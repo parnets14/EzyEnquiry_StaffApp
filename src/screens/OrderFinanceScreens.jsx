@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useApp } from '../AppContext';
+import { invoiceApi } from '../api';
+import { mapApiInvoice } from '../AppContext';
 import {
   AppHeader,
   ChoiceChips,
@@ -151,10 +153,12 @@ export const OrdersScreen = ({ navigation }) => {
 
       {visibleOrders.length ? (
         visibleOrders.map(order => {
-          const deliveryProgress = order.quantity
+          const deliveryProgress = (order.quantity && order.delivered)
             ? (order.delivered / order.quantity) * 100
             : 0;
           const isDelivered = order.status === 'DELIVERED';
+          const isPartiallyDelivered = (order.delivered || 0) > 0 && (order.delivered || 0) < (order.quantity || 0);
+          
           return (
             <SurfaceCard
               accessibilityHint="Opens order details"
@@ -195,6 +199,36 @@ export const OrdersScreen = ({ navigation }) => {
                   {formatCurrency(order.total)}
                 </Text>
               </View>
+
+              {/* Simple quantity row - TEMPORARY FIX */}
+              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 12, flexDirection: 'row', marginTop: 12, padding: 8 }}>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text style={{ color: '#68778A', fontSize: 9, fontWeight: '700' }}>ORDERED</Text>
+                  <Text style={{ color: '#061C35', fontSize: 17, fontWeight: '900', marginTop: 2 }}>{order.quantity || 0}</Text>
+                </View>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text style={{ color: '#68778A', fontSize: 9, fontWeight: '700' }}>PACKED</Text>
+                  <Text style={{ color: order.picked > 0 ? '#FF4B0A' : '#061C35', fontSize: 17, fontWeight: '900', marginTop: 2 }}>{order.picked || 0}</Text>
+                </View>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text style={{ color: '#68778A', fontSize: 9, fontWeight: '700' }}>DISPATCHED</Text>
+                  <Text style={{ color: order.dispatched > 0 ? '#FF4B0A' : '#061C35', fontSize: 17, fontWeight: '900', marginTop: 2 }}>{order.dispatched || 0}</Text>
+                </View>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text style={{ color: '#68778A', fontSize: 9, fontWeight: '700' }}>DELIVERED</Text>
+                  <Text style={{ color: order.delivered > 0 ? '#16875D' : '#061C35', fontSize: 17, fontWeight: '900', marginTop: 2 }}>{order.delivered || 0}</Text>
+                </View>
+              </View>
+
+              {/* Partial delivery notice */}
+              {isPartiallyDelivered ? (
+                <View style={{ alignItems: 'center', backgroundColor: '#FFF6DE', borderRadius: 8, flexDirection: 'row', gap: 8, marginTop: 8, padding: 8 }}>
+                  <Icon color={colors.warning} name="alert-circle-outline" size={16} />
+                  <Text style={{ color: '#C67B08', flex: 1, fontSize: 11, fontWeight: '700' }}>
+                    {order.delivered} of {order.quantity} delivered · {order.quantity - order.delivered} remaining
+                  </Text>
+                </View>
+              ) : null}
 
               {/* Progress */}
               <View style={styles.progressMetaRow}>
@@ -252,7 +286,14 @@ export const OrderDetailScreen = ({ navigation, route }) => {
     return <MissingRecord navigation={navigation} title="Order not found" />;
   }
 
+  // Debug: Check dispatch linking
+  console.log('OrderDetailScreen - order.id:', order.id);
+  console.log('OrderDetailScreen - order._id:', order._id);
+  console.log('OrderDetailScreen - All dispatches:', dispatches.map(d => ({ id: d.id, orderId: d.orderId, _orderId: d._orderId })));
+  
   const linkedDispatches = dispatches.filter(item => item.orderId === order.id);
+  console.log('OrderDetailScreen - Linked dispatches:', linkedDispatches.length);
+  
   const linkedInvoices = invoices.filter(item => item.orderId === order.id);
   const remainingToDispatch = order.quantity - order.dispatched;
   const remainingToDeliver = order.quantity - order.delivered;
@@ -322,7 +363,7 @@ export const OrderDetailScreen = ({ navigation, route }) => {
 
       <View style={styles.quantityDashboard}>
         <QuantityBlock label="Ordered" tone="navy" value={order.quantity} />
-        <QuantityBlock label="Picked" value={order.picked} />
+        <QuantityBlock label="Packed" value={order.picked} />
         <QuantityBlock label="Dispatched" value={order.dispatched} />
         <QuantityBlock label="Delivered" value={order.delivered} />
       </View>
@@ -337,7 +378,7 @@ export const OrderDetailScreen = ({ navigation, route }) => {
             <Text style={styles.remainingText}>{remainingToDispatch} to dispatch</Text>
           </View>
         </View>
-        <ProgressLabel label="Picking" total={order.quantity} value={order.picked} />
+        <ProgressLabel label="Packing" total={order.quantity} value={order.picked} />
         <ProgressLabel label="Dispatch" total={order.quantity} value={order.dispatched} />
         <ProgressLabel label="Delivery" total={order.quantity} value={order.delivered} />
         {remainingToDeliver > 0 && order.delivered > 0 ? (
@@ -485,10 +526,21 @@ export const OrderDetailScreen = ({ navigation, route }) => {
 };
 
 export const DispatchesScreen = ({ navigation, route }) => {
-  const { dispatches, orders } = useApp();
+  const { dispatches, orders, loadingDispatches } = useApp();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('ALL');
   const requestedOrder = route.params?.orderId;
+  
+  // Debug logging
+  console.log('DispatchesScreen - Total dispatches:', dispatches.length);
+  console.log('DispatchesScreen - Total orders:', orders.length);
+  console.log('DispatchesScreen - Loading:', loadingDispatches);
+  console.log('DispatchesScreen - Dispatches:', dispatches.map(d => ({ 
+    id: d.id, 
+    orderId: d.orderId, 
+    status: d.status 
+  })));
+  
   const visible = dispatches.filter(dispatch => {
     const order = orders.find(item => item.id === dispatch.orderId);
     const query = search.toLowerCase();
@@ -503,6 +555,8 @@ export const DispatchesScreen = ({ navigation, route }) => {
     return matchesOrder && matchesSearch && matchesFilter;
   });
 
+  console.log('DispatchesScreen - Visible after filter:', visible.length);
+
   return (
     <Screen>
       <AppHeader
@@ -512,42 +566,48 @@ export const DispatchesScreen = ({ navigation, route }) => {
         subtitle={requestedOrder ? `For ${requestedOrder}` : 'Picking, transit and delivery'}
         title="Dispatch tracking"
       />
-      <View style={styles.dispatchOverview}>
-        <OverviewItem
-          icon="package-variant-closed"
-          label="Ready"
-          value={dispatches.filter(item => item.status === 'READY_TO_DISPATCH').length}
-        />
-        <OverviewItem
-          icon="truck-delivery-outline"
-          label="In transit"
-          value={dispatches.filter(item => item.status === 'DISPATCHED').length}
-        />
-        <OverviewItem
-          icon="package-variant-closed"
-          label="Delivered"
-          value={dispatches.filter(item => item.status === 'DELIVERED').length}
-        />
-      </View>
-      <SearchInput
-        accessibilityLabel="Search dispatches"
-        onChangeText={setSearch}
-        placeholder="Search dispatch, order, customer or driver"
-        value={search}
-      />
-      <View style={styles.filterArea}>
-        <ChoiceChips
-          onChange={setFilter}
-          options={[
-            { label: 'All', value: 'ALL' },
-            { label: 'Ready', value: 'READY_TO_DISPATCH' },
-            { label: 'Dispatched', value: 'DISPATCHED' },
-            { label: 'Out for delivery', value: 'OUT_FOR_DELIVERY' },
-            { label: 'Delivered', value: 'DELIVERED' },
-          ]}
-          value={filter}
-        />
-      </View>
+      
+      {loadingDispatches && dispatches.length === 0 ? (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Loading dispatches...</Text>
+        </View>
+      ) : (
+        <>
+          <View style={styles.dispatchOverview}>
+            <OverviewItem
+              icon="truck-check-outline"
+              label="Dispatched"
+              value={dispatches.filter(item => item.status === 'DISPATCHED').length}
+            />
+            <OverviewItem
+              icon="truck-delivery-outline"
+              label="In transit"
+              value={dispatches.filter(item => item.status === 'IN_TRANSIT').length}
+            />
+            <OverviewItem
+              icon="package-check"
+              label="Delivered"
+              value={dispatches.filter(item => item.status === 'DELIVERED').length}
+            />
+          </View>
+          <SearchInput
+            accessibilityLabel="Search dispatches"
+            onChangeText={setSearch}
+            placeholder="Search dispatch, order, customer or driver"
+            value={search}
+          />
+          <View style={styles.filterArea}>
+            <ChoiceChips
+              onChange={setFilter}
+              options={[
+                { label: 'All', value: 'ALL' },
+                { label: 'Dispatched', value: 'DISPATCHED' },
+                { label: 'In transit', value: 'IN_TRANSIT' },
+                { label: 'Delivered', value: 'DELIVERED' },
+              ]}
+              value={filter}
+            />
+          </View>
       <View style={styles.resultsHeader}>
         <View>
           <Text style={styles.contextEyebrow}>SHIPMENT RECORDS</Text>
@@ -586,10 +646,10 @@ export const DispatchesScreen = ({ navigation, route }) => {
               </View>
               <View style={styles.dispatchProduct}>
                 <Text numberOfLines={2} style={styles.dispatchProductName}>
-                  {order?.productName}
+                  {order?.productName || 'Product'}
                 </Text>
                 <Text style={styles.dispatchQty}>
-                  {dispatch.quantity} {order?.unit}
+                  {dispatch.quantity} {order?.unit || 'units'}
                 </Text>
               </View>
               <View style={styles.dispatchRoute}>
@@ -597,14 +657,14 @@ export const DispatchesScreen = ({ navigation, route }) => {
                   <Icon color={colors.navy} name="account-outline" size={16} />
                 </View>
                 <Text numberOfLines={1} style={styles.dispatchRouteText}>
-                  {order?.customerName}
+                  {order?.customerName || 'Customer'}
                 </Text>
                 <Icon color={colors.textMuted} name="arrow-right" size={16} />
                 <View style={styles.routePointOrange}>
                   <Icon color={colors.primary} name="map-marker-outline" size={16} />
                 </View>
                 <Text numberOfLines={1} style={styles.dispatchRouteText}>
-                  {destination}
+                  {destination || 'Destination'}
                 </Text>
               </View>
               <View style={styles.dispatchFooter}>
@@ -624,21 +684,26 @@ export const DispatchesScreen = ({ navigation, route }) => {
         })
       ) : (
         <EmptyState
-          actionLabel={search ? 'Clear search' : undefined}
+          actionLabel={search ? 'Clear search' : dispatches.length === 0 ? 'Refresh' : undefined}
           icon="truck-remove-outline"
-          message="No dispatch records match the current order, search and status filters."
-          onAction={search ? () => setSearch('') : undefined}
-          title="No dispatches found"
+          message={
+            dispatches.length === 0 
+              ? 'No dispatches have been created yet. Dispatches are created after orders are ready for shipping.'
+              : 'No dispatch records match the current order, search and status filters.'
+          }
+          onAction={search ? () => setSearch('') : dispatches.length === 0 ? () => navigation.goBack() : undefined}
+          title={dispatches.length === 0 ? 'No dispatches yet' : 'No dispatches found'}
         />
+      )}
+        </>
       )}
     </Screen>
   );
 };
 
 const DISPATCH_STEPS = [
-  { key: 'READY_TO_DISPATCH', label: 'Ready', icon: 'package-variant-closed' },
-  { key: 'DISPATCHED', label: 'Dispatched', icon: 'truck-fast-outline' },
-  { key: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'map-marker-path' },
+  { key: 'DISPATCHED', label: 'Dispatched', icon: 'truck-check-outline' },
+  { key: 'IN_TRANSIT', label: 'In Transit', icon: 'truck-fast-outline' },
   { key: 'DELIVERED', label: 'Delivered', icon: 'check-circle-outline' },
 ];
 
@@ -656,6 +721,7 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
     0,
     DISPATCH_STEPS.findIndex(step => step.key === dispatch.status),
   );
+  const isDelivered = dispatch.status === 'DELIVERED';
   const otpVerified = dispatch.deliveryOtpStatus === 'OTP_VERIFIED';
   const destination = order?.deliveryAddress?.split(',')[0];
   const hasValue = value => value && value !== '—';
@@ -675,14 +741,25 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
         title={dispatch.id}
       />
 
+      {/* ── Delivery Success Banner (only for delivered dispatches) ── */}
+      {isDelivered && (
+        <NoticeBanner
+          icon="check-decagram"
+          message={`Successfully delivered on ${dispatch.deliveredDate || dispatch.expectedDelivery}${otpVerified ? ' · OTP verified' : ''}`}
+          title="Delivery Completed"
+          tone="success"
+          style={styles.deliverySuccessBanner}
+        />
+      )}
+
       {/* ── Hero: quantity + customer + route ── */}
-      <View style={styles.dispatchDetailHero}>
+      <View style={[styles.dispatchDetailHero, isDelivered && styles.dispatchDetailHeroDelivered]}>
         <View style={styles.dispatchHeroTop}>
-          <View style={styles.bigTruckIcon}>
-            <Icon color={colors.onNavy} name="truck-fast" size={28} />
+          <View style={[styles.bigTruckIcon, isDelivered && styles.bigTruckIconDelivered]}>
+            <Icon color={isDelivered ? colors.success : colors.onNavy} name={isDelivered ? "check-decagram" : "truck-fast"} size={28} />
           </View>
           <View style={styles.flexText}>
-            <Text style={styles.dispatchHeroEyebrow}>DISPATCH</Text>
+            <Text style={styles.dispatchHeroEyebrow}>{isDelivered ? 'DELIVERED' : 'DISPATCH'}</Text>
             <Text numberOfLines={1} style={styles.dispatchHeroId}>
               {dispatch.id}
             </Text>
@@ -713,9 +790,9 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
               {order?.customerName}
             </Text>
           </View>
-          <Icon color={colors.primary} name="arrow-right" size={16} />
-          <View style={styles.routeChip}>
-            <Icon color={colors.primary} name="map-marker-outline" size={14} />
+          <Icon color={isDelivered ? colors.success : colors.primary} name={isDelivered ? "check" : "arrow-right"} size={16} />
+          <View style={[styles.routeChip, isDelivered && styles.routeChipDelivered]}>
+            <Icon color={isDelivered ? colors.success : colors.primary} name={isDelivered ? "map-marker-check" : "map-marker-outline"} size={14} />
             <Text numberOfLines={1} style={styles.routeChipText}>
               {destination || 'Destination'}
             </Text>
@@ -813,31 +890,76 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
       <SurfaceCard style={styles.cardSpacing}>
         <Text style={styles.cardEyebrow}>DELIVERY</Text>
         <Text style={styles.cardHeading}>Timeline & verification</Text>
-        <TimelineRow icon="truck-check-outline" label="Dispatched" value={dispatch.dispatchDate} />
-        <TimelineRow icon="calendar-clock-outline" label="Expected date" value={dispatch.expectedDelivery} />
-        <TimelineRow icon="clock-outline" label="Expected time" value={dispatch.expectedDeliveryTime} />
-        <TimelineRow icon="package-variant-closed" label="Delivered" value={dispatch.deliveredDate} />
+        
+        {isDelivered ? (
+          <>
+            {/* Enhanced delivery summary for completed dispatches */}
+            <View style={styles.deliverySummaryBox}>
+              <View style={styles.deliverySummaryIcon}>
+                <Icon color={colors.success} name="package-check" size={32} />
+              </View>
+              <View style={styles.flexText}>
+                <Text style={styles.deliverySummaryTitle}>
+                  Delivered Successfully
+                </Text>
+                <Text style={styles.deliverySummaryDate}>
+                  {dispatch.deliveredDate || dispatch.expectedDelivery}
+                  {dispatch.deliveredTime ? ` at ${dispatch.deliveredTime}` : ''}
+                </Text>
+                {otpVerified && (
+                  <View style={styles.verifiedBadge}>
+                    <Icon color={colors.success} name="shield-check" size={14} />
+                    <Text style={styles.verifiedBadgeText}>OTP Verified</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+            
+            {/* Full timeline for reference */}
+            <View style={styles.timelineDivider} />
+            <Text style={styles.timelineSubheading}>Complete Journey</Text>
+            <TimelineRow icon="truck-check-outline" label="Dispatched" value={dispatch.dispatchDate} done />
+            <TimelineRow icon="truck-delivery-outline" label="In transit" value={dispatch.dispatchDate} done />
+            <TimelineRow icon="package-variant-closed" label="Delivered" value={dispatch.deliveredDate} done highlight />
+            {dispatch.deliveryNotes && (
+              <View style={styles.deliveryNotesBox}>
+                <Icon color={colors.textMuted} name="note-text-outline" size={16} />
+                <Text style={styles.deliveryNotes}>{dispatch.deliveryNotes}</Text>
+              </View>
+            )}
+          </>
+        ) : (
+          <>
+            {/* Active timeline for pending deliveries */}
+            <TimelineRow icon="truck-check-outline" label="Dispatched" value={dispatch.dispatchDate} />
+            <TimelineRow icon="calendar-clock-outline" label="Expected date" value={dispatch.expectedDelivery} />
+            <TimelineRow icon="clock-outline" label="Expected time" value={dispatch.expectedDeliveryTime} />
+            <TimelineRow icon="package-variant-closed" label="Delivered" value={dispatch.deliveredDate} pending />
+          </>
+        )}
 
-        <View
-          style={[styles.otpBadge, otpVerified ? styles.otpBadgeDone : styles.otpBadgePending]}>
-          <Icon
-            color={otpVerified ? colors.success : colors.warning}
-            name={otpVerified ? 'shield-check' : 'shield-alert-outline'}
-            size={20}
-          />
-          <View style={styles.flexText}>
-            <Text
-              style={[
-                styles.otpBadgeTitle,
-                { color: otpVerified ? colors.success : colors.warning },
-              ]}>
-              {otpVerified ? 'Delivery OTP verified' : 'Delivery OTP pending'}
-            </Text>
-            <Text style={styles.otpBadgeSub}>
-              {dispatch.deliveryOtpPurpose.replace(/_/g, ' ')}
-            </Text>
+        {!isDelivered && (
+          <View
+            style={[styles.otpBadge, otpVerified ? styles.otpBadgeDone : styles.otpBadgePending]}>
+            <Icon
+              color={otpVerified ? colors.success : colors.warning}
+              name={otpVerified ? 'shield-check' : 'shield-alert-outline'}
+              size={20}
+            />
+            <View style={styles.flexText}>
+              <Text
+                style={[
+                  styles.otpBadgeTitle,
+                  { color: otpVerified ? colors.success : colors.warning },
+                ]}>
+                {otpVerified ? 'Delivery OTP verified' : 'Delivery OTP pending'}
+              </Text>
+              <Text style={styles.otpBadgeSub}>
+                {dispatch.deliveryOtpPurpose?.replace(/_/g, ' ') || 'Verification required'}
+              </Text>
+            </View>
           </View>
-        </View>
+        )}
       </SurfaceCard>
 
       <NoticeBanner
@@ -1086,14 +1208,39 @@ export const InvoicesScreen = ({ navigation, route }) => {
 
 export const InvoiceDetailScreen = ({ navigation, route }) => {
   const { customers, invoices, payments, recordCollection } = useApp();
-  const invoice = invoices.find(item => item.id === route.params?.id);
+  const [invoice, setInvoice] = useState(invoices.find(item => item.id === route.params?.id));
+  const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState('CASH');
   const [amount, setAmount] = useState(String(invoice?.balance || ''));
   const [reference, setReference] = useState('');
   const [payError, setPayError] = useState('');
 
-  if (!invoice) {
+  // Fetch full invoice details with dispatch enrichment
+  useEffect(() => {
+    const fetchInvoiceDetails = async () => {
+      if (!route.params?.id) return;
+      setLoading(true);
+      try {
+        const res = await invoiceApi.get(route.params.id);
+        if (res.success && res.data) {
+          const mapped = mapApiInvoice(res.data);
+          setInvoice(mapped);
+        }
+      } catch (err) {
+        console.error('Failed to fetch invoice details:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchInvoiceDetails();
+  }, [route.params?.id]);
+
+  if (!invoice && !loading) {
     return <MissingRecord navigation={navigation} title="Invoice not found" />;
+  }
+  
+  if (!invoice) {
+    return <Screen><AppHeader navigation={navigation} showBack showNotifications={false} title="Loading..." /></Screen>;
   }
 
   const customer = customers.find(item => item.id === invoice.customerId);
@@ -1431,6 +1578,88 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
         />
       )}
 
+      {/* ── Linked Dispatch ────────────────────────────── */}
+      {invoice.dispatch ? (
+        <>
+          <SectionHeader title="Linked Dispatch" />
+          <SurfaceCard style={styles.cardSpacing}>
+            <View style={styles.dispatchLinkHeader}>
+              <View style={styles.dispatchLinkIcon}>
+                <Icon color={colors.primary} name="truck-fast-outline" size={24} />
+              </View>
+              <View style={styles.flexText}>
+                <Text style={styles.cardEyebrow}>DISPATCH</Text>
+                <Text numberOfLines={1} style={styles.cardHeading}>
+                  {invoice.dispatch.id}
+                </Text>
+              </View>
+              <StatusPill status={invoice.dispatch.status} />
+            </View>
+
+            <InfoRow label="Status" value={invoice.dispatch.status.replace(/_/g, ' ')} />
+            {invoice.dispatch.driverName ? (
+              <InfoRow label="Driver" value={invoice.dispatch.driverName} />
+            ) : null}
+            {invoice.dispatch.driverMobile ? (
+              <InfoRow label="Driver mobile" value={invoice.dispatch.driverMobile} />
+            ) : null}
+            {invoice.dispatch.vehicleNumber ? (
+              <InfoRow label="Vehicle" value={invoice.dispatch.vehicleNumber} />
+            ) : null}
+            {invoice.dispatch.transportName ? (
+              <InfoRow label="Transport" value={invoice.dispatch.transportName} />
+            ) : null}
+            {invoice.dispatch.lrNumber ? (
+              <InfoRow label="LR Number" value={invoice.dispatch.lrNumber} />
+            ) : null}
+            {invoice.dispatch.dispatchDate && invoice.dispatch.dispatchDate !== '—' ? (
+              <InfoRow label="Dispatch date" value={invoice.dispatch.dispatchDate} />
+            ) : null}
+            {invoice.dispatch.expectedDelivery && invoice.dispatch.expectedDelivery !== '—' ? (
+              <InfoRow label="Expected delivery" value={invoice.dispatch.expectedDelivery} />
+            ) : null}
+            {invoice.dispatch.deliveredDate && invoice.dispatch.deliveredDate !== '—' ? (
+              <InfoRow label="Delivered date" value={invoice.dispatch.deliveredDate} />
+            ) : null}
+            {invoice.dispatch.notes ? (
+              <InfoRow label="Notes" value={invoice.dispatch.notes} />
+            ) : null}
+
+            <PrimaryButton
+              icon="truck-fast-outline"
+              onPress={() => navigation.navigate('DispatchDetail', { id: invoice.dispatchId })}
+              style={styles.viewDispatchButton}
+              title="View dispatch details"
+              variant="outline"
+            />
+          </SurfaceCard>
+        </>
+      ) : invoice.dispatchId ? (
+        <>
+          <SectionHeader title="Linked Dispatch" />
+          <SurfaceCard style={styles.cardSpacing}>
+            <View style={styles.dispatchLinkHeader}>
+              <View style={styles.dispatchLinkIcon}>
+                <Icon color={colors.textMuted} name="truck-fast-outline" size={24} />
+              </View>
+              <View style={styles.flexText}>
+                <Text style={styles.cardEyebrow}>DISPATCH</Text>
+                <Text numberOfLines={1} style={styles.cardHeading}>
+                  {invoice.dispatchId}
+                </Text>
+              </View>
+            </View>
+            <PrimaryButton
+              icon="truck-fast-outline"
+              onPress={() => navigation.navigate('DispatchDetail', { id: invoice.dispatchId })}
+              style={styles.viewDispatchButton}
+              title="View dispatch details"
+              variant="outline"
+            />
+          </SurfaceCard>
+        </>
+      ) : null}
+
       <SectionHeader title={`Payments (${invoicePayments.length})`} />
       {invoicePayments.length ? (
         invoicePayments.map(payment => {
@@ -1466,13 +1695,6 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
           title="No payments recorded"
         />
       )}
-      <PrimaryButton
-        icon="truck-fast-outline"
-        onPress={() => navigation.navigate('DispatchDetail', { id: invoice.dispatchId })}
-        style={styles.linkedDispatchButton}
-        title="View linked dispatch"
-        variant="outline"
-      />
     </Screen>
   );
 };
@@ -1595,14 +1817,27 @@ const FinanceAction = ({ accessibilityLabel, icon, onPress, subtitle, title, ton
   </Pressable>
 );
 
-const TimelineRow = ({ icon, label, value }) => (
+const TimelineRow = ({ icon, label, value, done, pending, highlight }) => (
   <View style={styles.timelineRow}>
-    <View style={styles.timelineMarker}>
-      <Icon color={colors.primary} name={icon} size={17} />
+    <View style={[
+      styles.timelineMarker,
+      done && styles.timelineMarkerDone,
+      highlight && styles.timelineMarkerHighlight,
+      pending && styles.timelineMarkerPending
+    ]}>
+      <Icon 
+        color={done ? colors.success : pending ? colors.textMuted : colors.primary} 
+        name={done ? 'check-circle' : icon} 
+        size={17} 
+      />
     </View>
     <View style={styles.timelineText}>
-      <Text style={styles.timelineLabel}>{label}</Text>
-      <Text style={styles.timelineValue}>{value || 'Not recorded'}</Text>
+      <Text style={[styles.timelineLabel, highlight && styles.timelineLabelHighlight]}>
+        {label}
+      </Text>
+      <Text style={[styles.timelineValue, done && styles.timelineValueDone, pending && styles.timelineValuePending]}>
+        {value || (pending ? 'Pending' : 'Not recorded')}
+      </Text>
     </View>
   </View>
 );
@@ -1957,6 +2192,19 @@ const styles = StyleSheet.create({
   progressValue: { color: colors.navy, fontSize: typography.sizes.footnote, fontWeight: typography.weights.black },
   inlineNotice: { marginHorizontal: 0, marginTop: spacing.lg },
   cardSpacing: { marginTop: spacing.lg },
+
+  // ── Dispatch link in invoice detail ────────────────────
+  dispatchLinkHeader: { alignItems: 'center', flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg },
+  dispatchLinkIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    height: 48,
+    justifyContent: 'center',
+    width: 48,
+  },
+  viewDispatchButton: { marginTop: spacing.lg },
+
   workflowCard: { marginTop: spacing.lg },
   statusTrack: { marginTop: spacing.lg },
   statusStep: { flexDirection: 'row' },
@@ -2258,9 +2506,160 @@ const styles = StyleSheet.create({
   },
   timelineRow: { alignItems: 'center', flexDirection: 'row', minHeight: 54 },
   timelineMarker: { alignItems: 'center', backgroundColor: colors.primarySoft, borderRadius: radius.round, height: 34, justifyContent: 'center', marginRight: spacing.md, width: 34 },
+  timelineMarkerDone: { backgroundColor: colors.successSoft },
+  timelineMarkerHighlight: { backgroundColor: colors.success },
+  timelineMarkerPending: { backgroundColor: colors.surfaceSubtle },
   timelineText: { borderBottomColor: colors.divider, borderBottomWidth: 1, flex: 1, paddingVertical: spacing.sm },
   timelineLabel: { color: colors.textMuted, fontSize: typography.sizes.caption },
+  timelineLabelHighlight: { color: colors.success, fontWeight: typography.weights.extraBold },
   timelineValue: { color: colors.navy, flexShrink: 1, fontSize: typography.sizes.label, fontWeight: typography.weights.bold, marginTop: 2 },
+  timelineValueDone: { color: colors.success },
+  timelineValuePending: { color: colors.textMuted, fontStyle: 'italic' },
+
+  // ── Enhanced delivery display ──
+  deliverySuccessBanner: { marginHorizontal: spacing.lg, marginTop: spacing.lg },
+  dispatchDetailHeroDelivered: { backgroundColor: colors.successSoft, borderColor: colors.success, borderWidth: 1 },
+  bigTruckIconDelivered: { backgroundColor: colors.success },
+  routeChipDelivered: { backgroundColor: colors.successSoft, borderColor: colors.success, borderWidth: 1 },
+  
+  deliverySummaryBox: {
+    alignItems: 'center',
+    backgroundColor: colors.successSoft,
+    borderColor: colors.success,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
+  },
+  deliverySummaryIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.success,
+    borderRadius: radius.md,
+    height: 52,
+    justifyContent: 'center',
+    width: 52,
+  },
+  deliverySummaryTitle: {
+    color: colors.success,
+    fontSize: typography.sizes.subtitle,
+    fontWeight: typography.weights.black,
+  },
+  deliverySummaryDate: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.bold,
+    marginTop: 2,
+  },
+  verifiedBadge: {
+    alignItems: 'center',
+    backgroundColor: colors.success,
+    borderRadius: radius.sm,
+    flexDirection: 'row',
+    gap: 4,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+  },
+  verifiedBadgeText: {
+    color: colors.onNavy,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+  },
+  timelineDivider: {
+    backgroundColor: colors.divider,
+    height: 1,
+    marginBottom: spacing.md,
+    marginTop: spacing.lg,
+  },
+  timelineSubheading: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+    textTransform: 'uppercase',
+  },
+  deliveryNotesBox: {
+    alignItems: 'flex-start',
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    padding: spacing.md,
+  },
+  deliveryNotes: {
+    color: colors.text,
+    flex: 1,
+    fontSize: typography.sizes.footnote,
+    lineHeight: typography.lineHeights.body,
+  },
+
+  loadingContainer: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  loadingText: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.label,
+    marginTop: spacing.md,
+  },
+  
+  // Enhanced quantity grid in order list cards
+  orderQuantityGrid: {
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    padding: spacing.sm,
+  },
+  quantityGridItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  quantityGridLabel: {
+    color: colors.textMuted,
+    fontSize: 9,
+    fontWeight: typography.weights.bold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  quantityGridValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.subtitle,
+    fontWeight: typography.weights.black,
+    marginTop: 2,
+  },
+  quantityGridValueActive: {
+    color: colors.primary,
+  },
+  quantityGridValueSuccess: {
+    color: colors.success,
+  },
+  
+  // Partial delivery notice in order cards
+  partialDeliveryNotice: {
+    alignItems: 'center',
+    backgroundColor: colors.warningSoft,
+    borderRadius: radius.sm,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+    padding: spacing.sm,
+  },
+  partialDeliveryText: {
+    color: colors.warning,
+    flex: 1,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+  },
+
   linkedActions: { marginHorizontal: spacing.lg, marginTop: spacing.xs },
   linkedAction: { marginTop: spacing.md },
   deliveryOtpScreen: { flexGrow: 1 },

@@ -1,144 +1,325 @@
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useState,
-} from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { authApi, orderApi, invoiceApi } from './api';
-import { STORAGE_KEYS } from './config';
 import {
-  collectionsSeed,
-  customersSeed,
-  dispatchesSeed,
-  invoicesSeed,
-  notificationsSeed,
-  ordersSeed,
-  OTP_PURPOSES,
-  paymentsSeed,
-  productsSeed,
-  quotationsSeed,
-  staffProfile,
-} from './mockData';
+  authApi,
+  customerApi,
+  dispatchApi,
+  invoiceApi,
+  notificationApi,
+  orderApi,
+  productApi,
+  quotationApi,
+} from './api';
+import { STORAGE_KEYS } from './config';
+import { OTP_PURPOSES } from './constants';
 
 const AppContext = createContext(undefined);
 
-const nextNumber = (items, prefix, start) => {
-  const largest = items.reduce((max, item) => {
-    const value = Number(String(item.id).replace(/\D/g, ''));
-    return Number.isNaN(value) ? max : Math.max(max, value);
-  }, start);
-
-  return `${prefix}-${String(largest + 1).padStart(5, '0')}`;
-};
-
-const notificationFor = (type, title, message, route, entityId) => ({
-  id: `NOT-${Date.now()}`,
-  type,
-  title,
-  message,
-  time: 'Just now',
-  read: false,
-  route,
-  entityId,
-});
-
-// ── Backend → screen-shape mappers ───────────────────────────
-// The screens were built against camelCase mock records. These normalise the
-// snake_case documents the API returns into the same shape.
+// ── Helpers ───────────────────────────────────────────────────
 const fmtDate = d =>
   d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 
-const ORDER_STATUS_MAP = {
-  New: 'NEW', 'Pending Approval': 'PROCESSING', Approved: 'PROCESSING',
-  'Picking Started': 'PROCESSING', 'Picking Completed': 'PROCESSING',
-  'Sorting Started': 'PROCESSING', 'Sorting Completed': 'PROCESSING',
-  'Packing Started': 'PROCESSING', 'Packing Completed': 'PROCESSING',
-  'Invoice Generated': 'PROCESSING', 'Ready for Dispatch': 'READY',
-  'Partially Dispatched': 'DISPATCHED', Dispatched: 'DISPATCHED',
-  'In Transit': 'IN_TRANSIT', Delivered: 'DELIVERED', Cancelled: 'CANCELLED',
+const fmtDateTime = d => {
+  if (!d) return '';
+  return new Date(d).toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
 };
 
-const mapApiOrder = o => ({
-  id: o.order_code || o._id,
-  _id: o._id,
-  customerId: o.customer_id || '',
-  customerName: o.customer_name || '',
-  productName: o.product_name || '',
-  quantity: o.qty || 0,
-  unit: o.unit || '',
-  rate: o.rate || 0,
-  subtotal: o.amount || 0,
-  gstAmount: o.gst_amount || 0,
-  total: o.total_amount || 0,
-  status: ORDER_STATUS_MAP[o.status] || 'PROCESSING',
-  rawStatus: o.status || '',
-  enquiryCode: o.enquiry_code || '',
-  createdAt: fmtDate(o.created_at),
-  createdByType: o.created_by_type || '',
-  createdByName: o.created_by_name || '',
-  orderDate: fmtDate(o.order_date || o.created_at),
-});
+// ── Backend → screen-shape mappers ────────────────────────────
 
+// Orders: backend uses snake_case; screens expect camelCase-ish flat shape.
+const ORDER_STATUS_MAP = {
+  'New': 'NEW',
+  'Pending Approval': 'PROCESSING', 'Approved': 'PROCESSING',
+  'Picking Started': 'PROCESSING',  'Picking Completed': 'PROCESSING',
+  'Sorting Started': 'PROCESSING',  'Sorting Completed': 'PROCESSING',
+  'Packing Started': 'PROCESSING',  'Packing Completed': 'PROCESSING',
+  'Invoice Generated': 'PROCESSING',
+  'Ready for Dispatch': 'READY_TO_DISPATCH',
+  'Partially Dispatched': 'DISPATCHED', 'Dispatched': 'DISPATCHED',
+  'In Transit': 'IN_TRANSIT',
+  'Delivered': 'DELIVERED',
+  'Cancelled': 'CANCELLED',
+  'HOLD': 'HOLD',
+};
+
+const mapApiOrder = (o, allDispatches = []) => {
+  // Calculate delivered quantity from dispatches (like admin/retailer apps)
+  const orderCode = o.order_code || String(o._id);
+  const orderDispatches = allDispatches.filter(d => {
+    const dOrderId = typeof d.order_id === 'object' ? d.order_id?._id : d.order_id;
+    const dOrderCode = typeof d.order_id === 'object' ? d.order_id?.order_code : d.order_code;
+    return String(dOrderId) === String(o._id) || dOrderCode === orderCode;
+  });
+  
+  const deliveredQty = orderDispatches
+    .filter(d => d.status === 'Delivered')
+    .reduce((sum, d) => sum + (d.qty || 0), 0);
+
+  return {
+    id:            orderCode,
+    _id:           String(o._id),
+    customerId:    String(o.customer_id   || o.buyer_company_id || ''),
+    customerName:  o.customer_name  || '',
+    productName:   o.product_name   || '',
+    productCode:   o.product_code   || '',
+    quantity:      o.qty            || 0,
+    unit:          o.unit           || '',
+    rate:          o.rate           || 0,
+    subtotal:      o.amount         || 0,
+    gstAmount:     o.gst_amount     || 0,
+    total:         o.total_amount   || 0,
+    picked:        o.packed_qty     || 0,  // Backend uses packed_qty, not picked_qty
+    dispatched:    o.dispatched_qty || 0,
+    delivered:     deliveredQty,
+    status:        ORDER_STATUS_MAP[o.status] || o.status || 'PROCESSING',
+    rawStatus:     o.status || '',
+    wholesaler:    o.seller_company_name || o.supplier_name || '',
+    enquiryCode:   o.enquiry_code   || '',
+    quotationId:   o.quotation_no   || '',
+    deliveryAddress: o.delivery_address || o.location || '',
+    expectedDelivery: o.expected_delivery ? fmtDate(o.expected_delivery) : '—',
+    holdReason:    o.hold_reason    || null,
+    holdRemarks:   o.hold_remarks   || null,
+    heldBy:        o.held_by        || null,
+    heldAt:        o.held_at        ? fmtDateTime(o.held_at) : null,
+    previousStatus: o.previous_status ? ORDER_STATUS_MAP[o.previous_status] || o.previous_status : null,
+    dispatchIds:   (o.dispatch_ids  || []).map(String),
+    invoiceIds:    (o.invoice_ids   || []).map(String),
+    createdAt:     fmtDate(o.created_at),
+    orderDate:     fmtDate(o.order_date || o.created_at),
+    createdByType: o.created_by_type || '',
+    createdByName: o.created_by_name || '',
+  };
+};
+
+// Dispatches: backend status enum is 'Dispatched'|'In Transit'|'Delivered'|'Returned'
+const DISPATCH_STATUS_MAP = {
+  'Dispatched':  'DISPATCHED',
+  'In Transit':  'IN_TRANSIT',
+  'Delivered':   'DELIVERED',
+  'Returned':    'RETURNED',
+};
+
+const mapApiDispatch = d => {
+  // Handle populated order_id (object) or plain ObjectId (string)
+  const order = typeof d.order_id === 'object' && d.order_id ? d.order_id : null;
+  const orderCode = order?.order_code || d.order_code || '';
+  const orderId = order?._id || d.order_id || '';
+  
+  return {
+    id:           d.dispatch_code || String(d._id),
+    _id:          String(d._id),
+    orderId:      orderCode || String(orderId),
+    _orderId:     String(orderId),
+    quantity:     d.qty           || 0,
+    status:       DISPATCH_STATUS_MAP[d.status] || d.status || 'DISPATCHED',
+    rawStatus:    d.status        || '',
+    driverName:   d.driver_name   || 'To be assigned',
+    driverMobile: d.driver_mobile || '—',
+    vehicleNumber: d.vehicle_number || '—',
+    lrNumber:     d.lr_number     || '—',
+    transport:    d.transport_name || '—',
+    dispatchDate: d.dispatch_date  ? fmtDate(d.dispatch_date) : '—',
+    expectedDelivery: d.expected_delivery ? fmtDate(d.expected_delivery) : '—',
+    expectedDeliveryTime: d.expected_delivery ? fmtDateTime(d.expected_delivery).split(',')[1]?.trim() : '—',
+    deliveredDate: d.delivered_date ? fmtDate(d.delivered_date) : '—',
+    deliveredTime: d.delivered_date ? fmtDateTime(d.delivered_date).split(',')[1]?.trim() : '',
+    deliveryOtpStatus: d.status === 'Delivered' ? 'OTP_VERIFIED' : 'PENDING',
+    deliveryOtpPurpose: 'Delivery confirmation',
+    deliveryNotes: d.notes || '',
+    notes:        d.notes || '',
+  };
+};
+
+// Invoices
 const INV_STATUS_MAP = {
-  Unpaid: 'PENDING', 'Partially Paid': 'PARTIALLY_PAID', Paid: 'PAID',
-  Overdue: 'PENDING', Cancelled: 'CANCELLED',
+  'Unpaid': 'PENDING', 'Partially Paid': 'PARTIALLY_PAID',
+  'Paid': 'PAID', 'Overdue': 'PENDING', 'Cancelled': 'CANCELLED',
 };
 
 const mapApiInvoice = inv => {
   const item = (inv.items || [])[0] || {};
-  const qty = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  const qty  = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  
+  // Map enriched dispatch object (from getInvoice endpoint) if present
+  let dispatch = null;
+  if (inv.dispatch && typeof inv.dispatch === 'object') {
+    dispatch = {
+      id:             inv.dispatch.dispatch_code || String(inv.dispatch._id || ''),
+      _id:            String(inv.dispatch._id || ''),
+      orderId:        inv.dispatch.order_id ? String(inv.dispatch.order_id) : '',
+      status:         inv.dispatch.status || '',
+      driverName:     inv.dispatch.driver_name || '',
+      driverMobile:   inv.dispatch.driver_mobile || '',
+      vehicleNumber:  inv.dispatch.vehicle_number || '',
+      lrNumber:       inv.dispatch.lr_number || '',
+      transportName:  inv.dispatch.transport_name || '',
+      dispatchDate:   fmtDate(inv.dispatch.dispatch_date),
+      expectedDelivery: fmtDate(inv.dispatch.expected_delivery),
+      deliveredDate:  fmtDate(inv.dispatch.delivered_date),
+      notes:          inv.dispatch.notes || '',
+    };
+  }
+  
   return {
-    id: inv.invoice_no || inv._id,
-    _id: inv._id,
-    orderId: inv.order_no || '',
-    dispatchId: '',
-    customerId: inv.customer_id || '',
-    customerName: inv.customer_name || '',
-    productName: item.product_name || '',
-    quantity: qty,
-    unit: item.unit || '',
-    rate: item.rate || 0,
-    subtotal: inv.subtotal || 0,
-    gstAmount: inv.gst_amount || 0,
+    id:           inv.invoice_no  || String(inv._id),
+    _id:          String(inv._id),
+    orderId:      inv.order_no    || String(inv.order_id  || ''),
+    _orderId:     String(inv.order_id  || ''),
+    dispatchId:   inv.dispatch_code || String(inv.dispatch_id || ''),
+    _dispatchId:  String(inv.dispatch_id || ''),
+    customerId:   String(inv.customer_id || ''),
+    customerName: inv.customer_name  || '',
+    productName:  item.product_name  || '',
+    quantity:     qty,
+    unit:         item.unit          || '',
+    rate:         item.rate          || 0,
+    subtotal:     inv.subtotal       || 0,
+    gstAmount:    inv.gst_amount     || 0,
     deliveryCharge: (inv.freight_charges || 0) + (inv.other_charges || 0),
-    total: inv.grand_total || 0,
-    paidAmount: inv.paid_amount || 0,
-    balance: inv.balance_due != null ? inv.balance_due : (inv.grand_total || 0) - (inv.paid_amount || 0),
-    status: INV_STATUS_MAP[inv.payment_status] || 'PENDING',
-    dueDate: fmtDate(inv.due_date),
-    invoiceDate: fmtDate(inv.invoice_date),
+    total:        inv.grand_total    || 0,
+    paidAmount:   inv.paid_amount    || 0,
+    balance:      inv.balance_due    != null
+                    ? inv.balance_due
+                    : (inv.grand_total || 0) - (inv.paid_amount || 0),
+    status:       INV_STATUS_MAP[inv.payment_status] || 'PENDING',
+    dueDate:      fmtDate(inv.due_date),
+    invoiceDate:  fmtDate(inv.invoice_date),
     createdByType: inv.created_by_type || '',
+    dispatch,     // Enriched dispatch object (only present in getInvoice detail endpoint)
   };
 };
 
-// UI payment mode → backend enum.
+// Customers
+const mapApiCustomer = c => ({
+  id:           String(c._id),
+  _id:          String(c._id),
+  name:         c.name         || '',
+  mobile:       c.mobile       || '',
+  email:        c.email        || '',
+  gst:          c.gst_number   || 'Not provided',
+  address:      c.address      || '',
+  city:         c.city         || '',
+  state:        c.state        || '',
+  pincode:      c.pincode      || '',
+  type:         c.biz_type     || 'Customer',
+  outstanding:  c.outstanding_amount || 0,
+  orderCount:   c.order_count  || 0,
+  lastOrder:    c.last_order_date ? fmtDate(c.last_order_date) : 'No orders yet',
+});
+
+// Quotations
+const QUOTE_STATUS_MAP = {
+  'Draft': 'PENDING', 'Sent': 'PENDING',
+  'Negotiation': 'NEGOTIATION',
+  'Accepted': 'ACCEPTED', 'Rejected': 'REJECTED',
+  'Expired': 'EXPIRED',   'Cancelled': 'CANCELLED',
+  'Converted': 'CONVERTED',
+};
+
+const mapApiQuotation = q => {
+  const item = (q.items || [])[0] || {};
+  return {
+    id:            q.quotation_no  || String(q._id),
+    _id:           String(q._id),
+    createdByType: q.created_by_type === 'Admin' ? 'STAFF' : (q.created_by_type || 'STAFF'),
+    createdByName: q.created_by_name || '',
+    customerId:    String(q.customer_id  || ''),
+    customerName:  q.customer_name  || '',
+    productId:     String(item.product_id || ''),
+    productName:   item.product_name || '',
+    quantity:      Number(item.qty  || 0),
+    unit:          item.unit        || '',
+    rate:          Number(item.rate || 0),
+    discount:      Number(q.discount || 0),
+    gst:           Number(item.gst_percent || 18),
+    deliveryCharge: Number(q.freight_charges || 0),
+    total:         Number(q.grand_total || 0),
+    wholesaler:    q.supplier_name  || '',
+    status:        QUOTE_STATUS_MAP[q.status] || q.status || 'PENDING',
+    createdAt:     fmtDate(q.created_at),
+    remarks:       q.notes || '',
+    enquiryNo:     q.enquiry_no     || '',
+  };
+};
+
+// Products
+const mapApiProduct = p => ({
+  id:           String(p._id),
+  _id:          String(p._id),
+  code:         p.code            || '',
+  name:         p.name            || '',
+  brand:        p.brand_name      || p.brand_id?.name || '',
+  category:     p.category_name   || p.category_id?.name || '',
+  subCategory:  p.sub_category_name || '',
+  size:         p.size            || '',
+  finish:       p.finish          || '',
+  color:        p.color           || '',
+  unit:         p.unit            || 'Sq Ft',
+  gst:          p.gst_percent     || 18,
+  mrp:          p.mrp             || 0,
+  rate:         p.dealer_price    || p.retail_price || p.mrp || 0,
+  retailPrice:  p.retail_price    || 0,
+  dealerPrice:  p.dealer_price    || 0,
+  wholesaler:   p.wholesaler_name || '',
+  stock:        p.available_stock || p.current_stock || 0,
+});
+
+// Notifications
+const mapApiNotification = n => ({
+  id:       String(n._id),
+  _id:      String(n._id),
+  type:     n.type           || 'general',
+  title:    n.title          || '',
+  message:  n.message        || '',
+  time:     n.created_at ? fmtDateTime(n.created_at) : '',
+  read:     n.is_read        || false,
+  route:    n.route          || null,
+  entityId: n.reference_id   ? String(n.reference_id) : null,
+});
+
+// UI payment mode → backend enum
 const PAYMENT_MODE_MAP = {
-  CASH: 'Cash', UPI: 'UPI', BANK: 'Bank Transfer', 'BANK TRANSFER': 'Bank Transfer',
-  BANK_TRANSFER: 'Bank Transfer', CHEQUE: 'Cheque', CARD: 'Card',
+  CASH: 'Cash', UPI: 'UPI', BANK: 'Bank Transfer',
+  'BANK TRANSFER': 'Bank Transfer', BANK_TRANSFER: 'Bank Transfer',
+  CHEQUE: 'Cheque', CARD: 'Card',
 };
 
+// ── AppProvider ────────────────────────────────────────────────
 export const AppProvider = ({ children }) => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [pendingMobile, setPendingMobile] = useState('');
-  const [otpChallenge, setOtpChallenge] = useState(null);
-  const [staff, setStaff] = useState(staffProfile);
-  const [authLoading, setAuthLoading] = useState(false);
-  const [restoringSession, setRestoringSession] = useState(true);
-  const [customers, setCustomers] = useState(customersSeed);
-  const [quotations, setQuotations] = useState(quotationsSeed);
-  const [orders, setOrders] = useState(ordersSeed);
-  const [dispatches, setDispatches] = useState(dispatchesSeed);
-  const [invoices, setInvoices] = useState(invoicesSeed);
-  const [payments, setPayments] = useState(paymentsSeed);
-  const [collections, setCollections] = useState(collectionsSeed);
-  const [notifications, setNotifications] = useState(notificationsSeed);
+  const [isAuthenticated,  setIsAuthenticated]  = useState(false);
+  const [pendingMobile,    setPendingMobile]     = useState('');
+  const [otpChallenge,     setOtpChallenge]      = useState(null);
+  const [staff,            setStaff]             = useState(null);
+  const [authLoading,      setAuthLoading]       = useState(false);
+  const [restoringSession, setRestoringSession]  = useState(true);
 
-  const pushNotification = notification => {
-    setNotifications(current => [notification, ...current]);
-  };
+  // Business data — all start empty; populated from the API only.
+  const [orders,         setOrders]         = useState([]);
+  const [dispatches,     setDispatches]     = useState([]);
+  const [invoices,       setInvoices]       = useState([]);
+  const [customers,      setCustomers]      = useState([]);
+  const [quotations,     setQuotations]     = useState([]);
+  const [products,       setProducts]       = useState([]);
+  const [notifications,  setNotifications]  = useState([]);
+  const [unreadCount,    setUnreadCount]    = useState(0);
 
-  // Restore a saved session on app start so staff stay logged in.
+  // Collections and payments are local-only state that wraps invoice data.
+  // They are rebuilt when invoices load and when recordCollection fires.
+  const [collections, setCollections] = useState([]);
+  const [payments,    setPayments]    = useState([]);
+
+  // Track per-entity loading states so screens can show skeletons.
+  const [loadingOrders,     setLoadingOrders]     = useState(false);
+  const [loadingInvoices,   setLoadingInvoices]   = useState(false);
+  const [loadingCustomers,  setLoadingCustomers]  = useState(false);
+  const [loadingQuotations, setLoadingQuotations] = useState(false);
+  const [loadingDispatches, setLoadingDispatches] = useState(false);
+
+  // ── Session restore ──────────────────────────────────────────
   useEffect(() => {
     let active = true;
     (async () => {
@@ -149,109 +330,226 @@ export const AppProvider = ({ children }) => {
         ]);
         if (active && token) {
           if (savedStaff) {
-            try {
-              setStaff({ ...staffProfile, ...JSON.parse(savedStaff) });
-            } catch {
-              /* ignore malformed cache */
-            }
+            try { setStaff(JSON.parse(savedStaff)); } catch { /* ignore */ }
           }
           setIsAuthenticated(true);
         }
       } finally {
-        if (active) {
-          setRestoringSession(false);
-        }
+        if (active) setRestoringSession(false);
       }
     })();
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, []);
 
-  // Pull the company's real Sales Orders + Invoices from the backend and
-  // replace the mock seeds. Falls back silently to whatever is loaded.
-  const loadBusinessData = React.useCallback(async () => {
-    const [orderRes, invoiceRes] = await Promise.all([
-      orderApi.list({ limit: 100 }),
-      invoiceApi.list({ limit: 100 }),
+  // ── Load all business data ────────────────────────────────────
+  const loadBusinessData = useCallback(async () => {
+    // Load dispatches FIRST, then use them to calculate delivered quantities in orders
+    let rawDispatches = [];
+    
+    // 1. Load Dispatches
+    await (async () => {
+      setLoadingDispatches(true);
+      try {
+        console.log('🚀 Calling dispatch API: /staff/dispatches?limit=200');
+        const res = await dispatchApi.list({ limit: 200 });
+        console.log('📦 Dispatch API full response:', JSON.stringify(res, null, 2));
+        
+        if (res.success) {
+          const list = Array.isArray(res.data?.dispatches) ? res.data.dispatches
+                     : Array.isArray(res.data)              ? res.data : [];
+          console.log('✅ Raw dispatches loaded:', list.length);
+          rawDispatches = list; // Store for order mapping
+          const mapped = list.map(mapApiDispatch);
+          console.log('✅ Mapped dispatches:', mapped.length);
+          setDispatches(mapped);
+        } else {
+          console.error('❌ Dispatches API error:', res.message);
+          console.error('❌ Full error response:', JSON.stringify(res, null, 2));
+          // Continue anyway with empty dispatches
+          rawDispatches = [];
+          setDispatches([]);
+        }
+      } catch (err) {
+        console.error('❌ Dispatches fetch exception:', err.message || err);
+        console.error('❌ Exception stack:', err.stack);
+        rawDispatches = [];
+        setDispatches([]);
+      } finally {
+        setLoadingDispatches(false);
+      }
+    })();
+
+    // 2. Load Orders (and other data in parallel)
+    await Promise.allSettled([
+      (async () => {
+        setLoadingOrders(true);
+        try {
+          console.log('🚀 Calling order API: /staff/orders?limit=200');
+          const res = await orderApi.list({ limit: 200 });
+          console.log('📦 Orders API response:', { success: res.success, count: res.data?.orders?.length || 0 });
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.orders) ? res.data.orders
+                       : Array.isArray(res.data)          ? res.data : [];
+            console.log('✅ Raw orders loaded:', list.length);
+            console.log('📊 Sample raw order:', list.length > 0 ? {
+              id: list[0]._id,
+              code: list[0].order_code,
+              qty: list[0].qty,
+              packed: list[0].packed_qty,
+              dispatched: list[0].dispatched_qty,
+              delivered: list[0].delivered_qty,
+            } : 'No orders');
+            
+            // Pass rawDispatches to calculate delivered quantity
+            const mapped = list.map(o => mapApiOrder(o, rawDispatches));
+            console.log('✅ Mapped orders:', mapped.length);
+            console.log('📊 Sample mapped order:', mapped.length > 0 ? {
+              id: mapped[0].id,
+              quantity: mapped[0].quantity,
+              picked: mapped[0].picked,
+              dispatched: mapped[0].dispatched,
+              delivered: mapped[0].delivered,
+            } : 'No orders');
+            
+            setOrders(mapped);
+          } else {
+            console.error('❌ Orders API error:', res.message);
+          }
+        } catch (err) {
+          console.error('❌ Orders fetch error:', err.message || err);
+        } finally {
+          setLoadingOrders(false);
+        }
+      })(),
+
+      (async () => {
+        setLoadingInvoices(true);
+        const res = await invoiceApi.list({ limit: 200 });
+        if (res.success) {
+          const list = Array.isArray(res.data?.invoices) ? res.data.invoices
+                     : Array.isArray(res.data)            ? res.data : [];
+          const mapped = list.map(mapApiInvoice);
+          setInvoices(mapped);
+          // Seed local payments from invoices that have a paid amount already.
+          const seedPayments = mapped
+            .filter(inv => inv.paidAmount > 0)
+            .map(inv => ({
+              id:           `PAY-${inv.id}`,
+              invoiceId:    inv.id,
+              _invoiceId:   inv._id,
+              orderId:      inv.orderId,
+              customerId:   inv.customerId,
+              customerName: inv.customerName,
+              amount:       inv.paidAmount,
+              mode:         '—',
+              reference:    '',
+              status:       inv.status === 'PAID' ? 'VERIFIED' : 'COLLECTED',
+              date:         '',
+              createdBy:    '',
+            }));
+          setPayments(seedPayments);
+        }
+        setLoadingInvoices(false);
+      })(),
+
+      (async () => {
+        setLoadingCustomers(true);
+        const res = await customerApi.list({ limit: 200 });
+        if (res.success) {
+          const list = Array.isArray(res.data?.customers) ? res.data.customers
+                     : Array.isArray(res.data)             ? res.data : [];
+          setCustomers(list.map(mapApiCustomer));
+        }
+        setLoadingCustomers(false);
+      })(),
+
+      (async () => {
+        setLoadingQuotations(true);
+        const res = await quotationApi.list({ limit: 200 });
+        if (res.success) {
+          const list = Array.isArray(res.data?.quotations) ? res.data.quotations
+                     : Array.isArray(res.data)              ? res.data : [];
+          setQuotations(list.map(mapApiQuotation));
+        }
+        setLoadingQuotations(false);
+      })(),
+
+      (async () => {
+        const res = await productApi.list({ limit: 200 });
+        if (res.success) {
+          const list = Array.isArray(res.data?.products) ? res.data.products
+                     : Array.isArray(res.data)            ? res.data : [];
+          setProducts(list.map(mapApiProduct));
+        }
+      })(),
+
+      (async () => {
+        const res = await notificationApi.list({ limit: 50 });
+        if (res.success) {
+          const list = Array.isArray(res.data?.notifications) ? res.data.notifications
+                     : Array.isArray(res.data)                 ? res.data : [];
+          setNotifications(list.map(mapApiNotification));
+          setUnreadCount(res.data?.unreadCount ?? list.filter(n => !n.is_read).length);
+        }
+      })(),
     ]);
-    if (orderRes.success) {
-      const list = orderRes.data?.orders || orderRes.data || [];
-      if (Array.isArray(list)) setOrders(list.map(mapApiOrder));
-    }
-    if (invoiceRes.success) {
-      const list = invoiceRes.data?.invoices || invoiceRes.data || [];
-      if (Array.isArray(list)) setInvoices(list.map(mapApiInvoice));
-    }
   }, []);
 
-  // Load business data whenever the staff becomes authenticated.
   useEffect(() => {
     if (isAuthenticated) loadBusinessData();
   }, [isAuthenticated, loadBusinessData]);
 
-  // Request a login OTP for the mobile Admin registered in HR Employee Mgmt.
+  // ── Auth ─────────────────────────────────────────────────────
   const requestLoginOtp = async mobile => {
     const normalized = String(mobile).replace(/\D/g, '').slice(-10);
-
-    if (normalized.length !== 10) {
+    if (normalized.length !== 10)
       return { success: false, message: 'Enter a valid 10-digit mobile number.' };
-    }
 
     setAuthLoading(true);
     const result = await authApi.staffSendOtp(normalized);
     setAuthLoading(false);
 
-    if (!result.success) {
-      return { success: false, message: result.message };
-    }
-
+    if (!result.success) return { success: false, message: result.message };
     setPendingMobile(normalized);
-    // In dev the backend may return the OTP so it can be shown during testing.
     return { success: true, devOtp: result.data?.otp || null };
   };
 
   const verifyLoginOtp = async otp => {
     const code = String(otp).replace(/\D/g, '');
-    if (!pendingMobile) {
+    if (!pendingMobile)
       return { success: false, message: 'Request a new Staff login OTP.' };
-    }
-    if (code.length !== 6) {
+    if (code.length !== 6)
       return { success: false, message: 'Enter the 6-digit OTP.' };
-    }
 
     setAuthLoading(true);
     const result = await authApi.staffVerifyOtp(pendingMobile, code);
     setAuthLoading(false);
 
-    if (!result.success) {
-      return { success: false, message: result.message };
-    }
+    if (!result.success) return { success: false, message: result.message };
 
     const { token, staff: staffRecord } = result.data || {};
-    if (token) {
-      await AsyncStorage.setItem(STORAGE_KEYS.token, token);
-    }
-    if (staffRecord) {
-      // Build the profile from the real employee record. Fall back to empty
-      // strings (not mock data) so the UI shows the actual logged-in details.
-      const merged = {
-        id: staffRecord.empCode || staffRecord.id || pendingMobile,
-        name: staffRecord.name || '',
-        mobile: staffRecord.mobile || pendingMobile,
-        email: staffRecord.email || '',
-        designation: staffRecord.designation || '',
-        department: staffRecord.department || '',
-        branch: staffRecord.branch || '',
-        role: staffRecord.role || '',
-        joinDate: staffRecord.joinDate || null,
-        company: staffRecord.companyName || '',
-        employeeCode: staffRecord.empCode || '',
-        status: staffRecord.status || 'ACTIVE',
-        backendId: staffRecord.id,
-        userId: staffRecord.userId,
-        companyId: staffRecord.companyId,
-      };
+    if (token) await AsyncStorage.setItem(STORAGE_KEYS.token, token);
+
+    const merged = staffRecord ? {
+      id:           staffRecord.empCode || staffRecord.id || pendingMobile,
+      name:         staffRecord.name         || '',
+      mobile:       staffRecord.mobile       || pendingMobile,
+      email:        staffRecord.email        || '',
+      designation:  staffRecord.designation  || '',
+      department:   staffRecord.department   || '',
+      branch:       staffRecord.branch       || '',
+      role:         staffRecord.role         || '',
+      joinDate:     staffRecord.joinDate     || null,
+      company:      staffRecord.companyName  || '',
+      employeeCode: staffRecord.empCode      || '',
+      status:       staffRecord.status       || 'ACTIVE',
+      backendId:    staffRecord.id,
+      userId:       staffRecord.userId,
+      companyId:    staffRecord.companyId,
+    } : null;
+
+    if (merged) {
       setStaff(merged);
       await AsyncStorage.setItem(STORAGE_KEYS.staff, JSON.stringify(merged));
     }
@@ -263,445 +561,224 @@ export const AppProvider = ({ children }) => {
 
   const logout = async () => {
     await AsyncStorage.multiRemove([STORAGE_KEYS.token, STORAGE_KEYS.staff]);
-    setStaff(staffProfile);
+    // Reset all state to empty — no static fallback.
+    setStaff(null);
     setIsAuthenticated(false);
     setPendingMobile('');
+    setOtpChallenge(null);
+    setOrders([]);
+    setDispatches([]);
+    setInvoices([]);
+    setCustomers([]);
+    setQuotations([]);
+    setProducts([]);
+    setNotifications([]);
+    setUnreadCount(0);
+    setCollections([]);
+    setPayments([]);
   };
 
-  const addCustomer = form => {
-    const customer = {
-      id: nextNumber(customers, 'CUS', 1003),
-      name: form.name.trim(),
-      mobile: form.mobile.trim(),
-      email: form.email.trim(),
-      gst: form.gst.trim() || 'Not provided',
-      address: form.address.trim(),
-      city: form.city.trim(),
-      state: form.state.trim(),
-      pincode: form.pincode.trim(),
-      type: 'Customer',
-      outstanding: 0,
-      orderCount: 0,
-      lastOrder: 'No orders yet',
-    };
-
-    setCustomers(current => [customer, ...current]);
-    pushNotification(
-      notificationFor(
-        'customer',
-        'Customer created',
-        `${customer.name} is now visible to Staff and Admin.`,
-        'CustomerDetail',
-        customer.id,
-      ),
-    );
+  // ── Customers ─────────────────────────────────────────────────
+  const addCustomer = async form => {
+    const res = await customerApi.create({
+      name:       form.name.trim(),
+      mobile:     form.mobile.trim(),
+      email:      form.email.trim(),
+      gst_number: form.gst.trim() || '',
+      address:    form.address.trim(),
+      city:       form.city.trim(),
+      state:      form.state.trim(),
+      pincode:    form.pincode.trim(),
+      biz_type:   'Customer',
+    });
+    if (!res.success) return { success: false, message: res.message };
+    const customer = mapApiCustomer(res.data);
+    setCustomers(prev => [customer, ...prev]);
     return customer;
   };
 
-  const createQuotation = form => {
-    const customer = customers.find(item => item.id === form.customerId);
-    const product = productsSeed.find(item => item.id === form.productId);
-    const quantity = Number(form.quantity);
-    const rate = Number(form.rate);
-    const discount = Number(form.discount || 0);
-    const deliveryCharge = Number(form.deliveryCharge || 0);
-    const otherCharge = Number(form.otherCharge || 0);
-    const taxable = Math.max(0, quantity * rate - discount);
-    const gstAmount = taxable * (Number(form.gst || product.gst) / 100);
-    const quotation = {
-      id: nextNumber(quotations, 'QT', 126),
-      createdByType: 'STAFF',
-      createdByName: staffProfile.name,
-      creationAction: 'STAFF_QUOTATION',
-      adminVisibility: 'SUBMITTED_TO_ADMIN',
-      customerId: customer.id,
-      customerName: customer.name,
-      productId: product.id,
-      productName: product.name,
-      quantity,
-      unit: product.unit,
-      rate,
-      discount,
-      gst: Number(form.gst || product.gst),
-      deliveryCharge,
-      otherCharge,
-      total: Math.round(taxable + gstAmount + deliveryCharge + otherCharge),
-      wholesaler: product.wholesaler,
-      validUntil: String(form.validUntil ?? '').trim() || 'Not specified',
-      status: 'PENDING',
-      createdAt: '27 Aug 2026',
-      remarks:
-        String(form.remarks ?? '').trim() ||
-        'Created by Staff for customer.',
-      terms: String(form.terms ?? '').trim(),
-    };
+  // ── Quotations ────────────────────────────────────────────────
+  const createQuotation = async form => {
+    const customer = customers.find(c => c.id === form.customerId || c._id === form.customerId);
+    const product  = products.find(p => p.id === form.productId  || p._id === form.productId);
+    if (!customer || !product) {
+      return { success: false, message: 'Customer or product not found.' };
+    }
 
-    setQuotations(current => [quotation, ...current]);
-    pushNotification(
-      notificationFor(
-        'quotation',
-        'Quotation submitted to Admin',
-        `${quotation.id} created by ${staffProfile.name} for ${quotation.customerName}.`,
-        'QuotationDetail',
-        quotation.id,
-      ),
-    );
+    const qty      = Number(form.quantity);
+    const rate     = Number(form.rate);
+    const discount = Number(form.discount || 0);
+    const gstPct   = Number(form.gst || product.gst || 18);
+    const freight  = Number(form.deliveryCharge || 0);
+    const taxable  = Math.max(0, qty * rate - discount);
+    const gstAmt   = taxable * (gstPct / 100);
+    const grand    = Math.round(taxable + gstAmt + freight);
+
+    const res = await quotationApi.create({
+      customer_name:   customer.name,
+      customer_id:     customer._id,
+      customer_phone:  customer.mobile,
+      created_by_type: 'Admin',  // staff users map to Admin role on the backend
+      created_by_name: staff?.name || '',
+      items: [{
+        product_id:   product._id,
+        product_code: product.code,
+        product_name: product.name,
+        qty,
+        rate,
+        unit:         product.unit,
+        gst_percent:  gstPct,
+        disc:         discount,
+      }],
+      discount,
+      subtotal:      taxable,
+      gst_amount:    gstAmt,
+      grand_total:   grand,
+      freight_charges: freight,
+      notes:         String(form.remarks || '').trim() || 'Created by Staff.',
+      valid_until:   form.validUntil || null,
+    });
+
+    if (!res.success) return { success: false, message: res.message };
+    const quotation = mapApiQuotation(res.data);
+    setQuotations(prev => [quotation, ...prev]);
     return quotation;
   };
 
-  const advanceOrder = orderId => {
-    const statusFlow = {
-      CONFIRMED: 'PACKING',
-      PACKING: 'READY_TO_DISPATCH',
-      READY_TO_DISPATCH: 'OUT_FOR_DELIVERY',
-    };
-    const order = orders.find(item => item.id === orderId);
-    const nextStatus = order ? statusFlow[order.status] : null;
+  // ── Orders (read-only for staff — status changes driven by Admin) ──
+  const advanceOrder = () => null;      // staff cannot advance orders
+  const holdOrder    = () => null;
+  const resumeOrder  = () => null;
 
-    if (!nextStatus) {
-      return null;
-    }
-
-    if (nextStatus === 'OUT_FOR_DELIVERY') {
-      setDispatches(current =>
-        current.map(item =>
-          item.orderId === orderId && item.status !== 'DELIVERED'
-            ? {
-                ...item,
-                status: 'OUT_FOR_DELIVERY',
-                deliveryOtpStatus: 'PENDING',
-              }
-            : item,
-        ),
-      );
-    }
-
-    setOrders(current =>
-      current.map(item =>
-        item.id === orderId ? { ...item, status: nextStatus } : item,
-      ),
-    );
-    pushNotification(
-      notificationFor(
-        'order',
-        'Order status updated',
-        `${orderId} moved to ${nextStatus.replace(/_/g, ' ')}.`,
-        'OrderDetail',
-        orderId,
-      ),
-    );
-    return nextStatus;
-  };
-
+  // ── Dispatches (read-only) ────────────────────────────────────
+  // Delivery-OTP verify is local in-app only (no backend endpoint yet).
   const requestDeliveryOtp = dispatchId => {
-    const dispatch = dispatches.find(item => item.id === dispatchId);
-
+    const dispatch = dispatches.find(d => d.id === dispatchId || d._id === dispatchId);
     if (!dispatch || dispatch.status !== 'OUT_FOR_DELIVERY') {
-      return {
-        success: false,
-        message: 'Delivery OTP is available only for an out-for-delivery dispatch.',
-      };
+      return { success: false, message: 'Delivery OTP is only available for an out-for-delivery dispatch.' };
     }
-
-    setOtpChallenge({
-      purpose: OTP_PURPOSES.DELIVERY,
-      code: '135790',
-      dispatchId: dispatch.id,
-      orderId: dispatch.orderId,
-    });
+    // In production an SMS OTP would be sent. For now we signal that the request
+    // was made and let the user wait for the actual SMS from the backend.
+    setOtpChallenge({ purpose: OTP_PURPOSES.DELIVERY, dispatchId: dispatch.id });
     return { success: true, dispatchId: dispatch.id };
   };
 
-  const verifyDeliveryOtp = (dispatchId, otp) => {
-    if (
-      !otpChallenge ||
-      otpChallenge.purpose !== OTP_PURPOSES.DELIVERY ||
-      otpChallenge.dispatchId !== dispatchId
-    ) {
-      return { success: false, message: 'Request a new Delivery OTP first.' };
-    }
+  const verifyDeliveryOtp = (_dispatchId, _otp) => ({
+    success: false,
+    message: 'Delivery confirmation is handled by Admin. No action needed here.',
+  });
 
-    if (String(otp) !== otpChallenge.code) {
-      return {
-        success: false,
-        message: 'Incorrect Delivery OTP. Use 135790 for this static demo.',
-      };
-    }
-
-    const dispatch = dispatches.find(item => item.id === dispatchId);
-    const order = orders.find(item => item.id === dispatch?.orderId);
-    if (!dispatch || !order || dispatch.status !== 'OUT_FOR_DELIVERY') {
-      return { success: false, message: 'This dispatch cannot be delivered.' };
-    }
-
-    const delivered = Math.min(
-      order.quantity,
-      dispatches
-        .filter(item => item.orderId === order.id)
-        .reduce(
-          (sum, item) =>
-            sum +
-            (item.id === dispatchId || item.status === 'DELIVERED'
-              ? item.quantity
-              : 0),
-          0,
-        ),
-    );
-    const status =
-      delivered === order.quantity ? 'DELIVERED' : 'PARTIALLY_DELIVERED';
-
-    setDispatches(current =>
-      current.map(item =>
-        item.id === dispatchId
-          ? {
-              ...item,
-              status: 'DELIVERED',
-              deliveryOtpStatus: 'OTP_VERIFIED',
-              deliveredDate: '27 Aug 2026',
-            }
-          : item,
-      ),
-    );
-    setOrders(current =>
-      current.map(item =>
-        item.id === order.id ? { ...item, delivered, status } : item,
-      ),
-    );
-    setOtpChallenge(null);
-    pushNotification(
-      notificationFor(
-        'delivery',
-        'Delivery OTP verified',
-        `${dispatchId} delivered ${dispatch.quantity} ${order.unit}; ${order.id} is ${status.replace(/_/g, ' ')}.`,
-        'DispatchDetail',
-        dispatchId,
-      ),
-    );
-    return { success: true, orderId: order.id, status };
-  };
-
-  const holdOrder = (orderId, reason, remarks) => {
-    const order = orders.find(item => item.id === orderId);
-    if (!order || ['DELIVERED', 'CANCELLED'].includes(order.status)) {
-      return null;
-    }
-
-    const previousStatus = order.status;
-    setOrders(current =>
-      current.map(item =>
-        item.id === orderId
-          ? {
-              ...item,
-              status: 'HOLD',
-              previousStatus,
-              holdReason: reason,
-              holdRemarks: remarks,
-              heldBy: staffProfile.name,
-              heldAt: '27 Aug 2026, 04:30 PM',
-            }
-          : item,
-      ),
-    );
-    pushNotification(
-      notificationFor(
-        'order',
-        'Order placed on HOLD',
-        `${orderId} is on hold: ${String(reason).replace(/_/g, ' ')}.`,
-        'OrderDetail',
-        orderId,
-      ),
-    );
-    return 'HOLD';
-  };
-
-  const resumeOrder = orderId => {
-    const order = orders.find(item => item.id === orderId);
-    if (!order || order.status !== 'HOLD') {
-      return null;
-    }
-
-    const resumedStatus = order.previousStatus || 'PROCESSING';
-    setOrders(current =>
-      current.map(item =>
-        item.id === orderId
-          ? {
-              ...item,
-              status: resumedStatus,
-              holdResolvedAt: '27 Aug 2026, 05:00 PM',
-            }
-          : item,
-      ),
-    );
-    pushNotification(
-      notificationFor(
-        'order',
-        'Order hold resolved',
-        `${orderId} resumed as ${resumedStatus.replace(/_/g, ' ')}.`,
-        'OrderDetail',
-        orderId,
-      ),
-    );
-    return resumedStatus;
-  };
-
+  // ── Collections (local workflow wrapping invoice payments) ────
   const recordCollection = async details => {
-    const invoice = invoices.find(item => item.id === details.invoiceId);
+    const invoice = invoices.find(
+      inv => inv.id === details.invoiceId || inv._id === details.invoiceId,
+    );
     const amount = Number(details.amount);
 
     if (!invoice || amount <= 0 || amount > invoice.balance) {
       return { success: false, message: 'Collection amount exceeds invoice balance.' };
     }
 
-    // Persist the payment against the real invoice on the backend.
-    if (invoice._id) {
-      const res = await invoiceApi.recordPayment(invoice._id, {
-        amount,
-        payment_mode: PAYMENT_MODE_MAP[String(details.mode || '').toUpperCase()] || 'Cash',
-        reference_no: (details.reference || '').trim(),
-      });
-      if (!res.success) {
-        return { success: false, message: res.message || 'Could not record payment.' };
-      }
-    }
+    // Persist the payment on the backend against the real invoice _id.
+    const res = await invoiceApi.recordPayment(invoice._id, {
+      amount,
+      payment_mode:  PAYMENT_MODE_MAP[String(details.mode || '').toUpperCase()] || 'Cash',
+      reference_no: (details.reference || '').trim(),
+    });
+    if (!res.success) return { success: false, message: res.message || 'Could not record payment.' };
 
+    const now = new Date();
     const payment = {
-      id: nextNumber(payments, 'PAY', 59),
-      invoiceId: invoice.id,
-      orderId: invoice.orderId,
-      customerId: invoice.customerId,
+      id:           `PAY-${Date.now()}`,
+      invoiceId:    invoice.id,
+      _invoiceId:   invoice._id,
+      orderId:      invoice.orderId,
+      customerId:   invoice.customerId,
       customerName: invoice.customerName,
       amount,
-      mode: details.mode,
+      mode:     details.mode,
       reference: (details.reference || '').trim() || 'Staff collection',
-      status: 'COLLECTED',
-      date: fmtDate(new Date()),
-      createdBy: staff.name || staffProfile.name,
+      status:   'COLLECTED',
+      date:     fmtDate(now),
+      createdBy: staff?.name || '',
     };
     const collection = {
-      id: nextNumber(collections, 'COL', 101),
-      paymentId: payment.id,
-      invoiceId: invoice.id,
-      orderId: invoice.orderId,
-      customerId: invoice.customerId,
+      id:           `COL-${Date.now()}`,
+      paymentId:    payment.id,
+      invoiceId:    invoice.id,
+      _invoiceId:   invoice._id,
+      orderId:      invoice.orderId,
+      customerId:   invoice.customerId,
       customerName: invoice.customerName,
-      staffId: staffProfile.id,
-      staffName: staffProfile.name,
+      staffId:      staff?.id || '',
+      staffName:    staff?.name || '',
       amount,
-      mode: payment.mode,
+      mode:     payment.mode,
       reference: payment.reference,
-      collectedAt: '27 Aug 2026, 04:45 PM',
+      collectedAt: fmtDateTime(now),
       handedOverAt: null,
-      verifiedAt: null,
-      status: 'COLLECTED',
+      verifiedAt:   null,
+      status:       'COLLECTED',
     };
-    const paidAmount = Math.min(invoice.total, invoice.paidAmount + amount);
-    const balance = Math.max(0, invoice.total - paidAmount);
 
-    setPayments(current => [payment, ...current]);
-    setCollections(current => [collection, ...current]);
-    setInvoices(current =>
-      current.map(item =>
-        item.id === invoice.id
-          ? {
-              ...item,
-              paidAmount,
-              balance,
-              status: balance === 0 ? 'PAID' : 'PARTIALLY_PAID',
-            }
-          : item,
+    const paidAmount = Math.min(invoice.total, invoice.paidAmount + amount);
+    const balance    = Math.max(0, invoice.total - paidAmount);
+
+    setPayments(prev  => [payment, ...prev]);
+    setCollections(prev => [collection, ...prev]);
+    setInvoices(prev =>
+      prev.map(inv =>
+        (inv.id === invoice.id || inv._id === invoice._id)
+          ? { ...inv, paidAmount, balance, status: balance === 0 ? 'PAID' : 'PARTIALLY_PAID' }
+          : inv,
       ),
     );
-    setCustomers(current =>
-      current.map(customer =>
-        customer.id === invoice.customerId
-          ? {
-              ...customer,
-              outstanding: Math.max(0, customer.outstanding - amount),
-            }
-          : customer,
+    setCustomers(prev =>
+      prev.map(c =>
+        (c.id === invoice.customerId || c._id === invoice.customerId)
+          ? { ...c, outstanding: Math.max(0, c.outstanding - amount) }
+          : c,
       ),
     );
-    pushNotification(
-      notificationFor(
-        'collection',
-        'Collection recorded',
-        `${collection.id} collected for ${invoice.id}. Handover to Accounts is pending.`,
-        'CollectionDetail',
-        collection.id,
-      ),
-    );
+
     return { success: true, collection, payment };
   };
 
   const handoverCollection = collectionId => {
-    const collection = collections.find(item => item.id === collectionId);
-    if (!collection || collection.status !== 'COLLECTED') {
-      return null;
-    }
-
-    setCollections(current =>
-      current.map(item =>
-        item.id === collectionId
-          ? {
-              ...item,
-              status: 'HANDOVER_PENDING',
-              handedOverAt: '27 Aug 2026, 05:10 PM',
-            }
-          : item,
+    const collection = collections.find(c => c.id === collectionId);
+    if (!collection || collection.status !== 'COLLECTED') return null;
+    setCollections(prev =>
+      prev.map(c =>
+        c.id === collectionId
+          ? { ...c, status: 'HANDOVER_PENDING', handedOverAt: fmtDateTime(new Date()) }
+          : c,
       ),
     );
-    setPayments(current =>
-      current.map(item =>
-        item.id === collection.paymentId
-          ? { ...item, status: 'HANDOVER_PENDING' }
-          : item,
-      ),
-    );
-    pushNotification(
-      notificationFor(
-        'collection',
-        'Collection sent to Accounts',
-        `${collectionId} is waiting for Accounts verification.`,
-        'CollectionDetail',
-        collectionId,
-      ),
+    setPayments(prev =>
+      prev.map(p => p.id === collection.paymentId ? { ...p, status: 'HANDOVER_PENDING' } : p),
     );
     return 'HANDOVER_PENDING';
   };
 
   const startAccountsVerification = collectionId => {
-    const collection = collections.find(item => item.id === collectionId);
-    if (!collection || collection.status !== 'HANDOVER_PENDING') {
-      return null;
-    }
-
-    setCollections(current =>
-      current.map(item =>
-        item.id === collectionId
-          ? { ...item, status: 'ACCOUNT_VERIFICATION' }
-          : item,
-      ),
+    const collection = collections.find(c => c.id === collectionId);
+    if (!collection || collection.status !== 'HANDOVER_PENDING') return null;
+    setCollections(prev =>
+      prev.map(c => c.id === collectionId ? { ...c, status: 'ACCOUNT_VERIFICATION' } : c),
     );
     setOtpChallenge({
-      purpose: OTP_PURPOSES.PAYMENT_COLLECTION,
-      code: '246810',
+      purpose:      OTP_PURPOSES.PAYMENT_COLLECTION,
       collectionId,
-      mobile: staffProfile.mobile,
-      staffId: staffProfile.id,
+      mobile:       staff?.mobile || '',
+      staffId:      staff?.id     || '',
     });
-    pushNotification(
-      notificationFor(
-        'collection',
-        'Accounts requested OTP verification',
-        `${OTP_PURPOSES.PAYMENT_COLLECTION} sent for ${collectionId}.`,
-        'CollectionOtp',
-        collectionId,
-      ),
-    );
     return 'ACCOUNT_VERIFICATION';
   };
 
   const verifyCollectionOtp = (collectionId, otp) => {
+    // The backend does not yet have a dedicated collection-verify endpoint, so
+    // this remains a local in-app handshake between the staff member and the
+    // accountant. The accountant reads the OTP shown on the staff screen.
     if (
       !otpChallenge ||
       otpChallenge.purpose !== OTP_PURPOSES.PAYMENT_COLLECTION ||
@@ -709,73 +786,59 @@ export const AppProvider = ({ children }) => {
     ) {
       return { success: false, message: 'Accounts must start verification first.' };
     }
-
-    if (String(otp) !== otpChallenge.code) {
-      return {
-        success: false,
-        message: 'Incorrect collection OTP. Use 246810 for this static demo.',
-      };
+    // Treat any 6-digit entry as the "signal" — in a real implementation an
+    // SMS OTP would be sent from the backend and validated here.
+    if (String(otp).replace(/\D/g, '').length !== 6) {
+      return { success: false, message: 'Enter the 6-digit OTP.' };
     }
-
-    const collection = collections.find(item => item.id === collectionId);
-    setCollections(current =>
-      current.map(item =>
-        item.id === collectionId
-          ? {
-              ...item,
-              status: 'ACCOUNT_VERIFIED',
-              verifiedAt: '27 Aug 2026, 05:20 PM',
-            }
-          : item,
+    const collection = collections.find(c => c.id === collectionId);
+    setCollections(prev =>
+      prev.map(c =>
+        c.id === collectionId
+          ? { ...c, status: 'ACCOUNT_VERIFIED', verifiedAt: fmtDateTime(new Date()) }
+          : c,
       ),
     );
-    setPayments(current =>
-      current.map(item =>
-        item.id === collection.paymentId
-          ? { ...item, status: 'VERIFIED' }
-          : item,
-      ),
+    setPayments(prev =>
+      prev.map(p => p.id === collection?.paymentId ? { ...p, status: 'VERIFIED' } : p),
     );
     setOtpChallenge(null);
-    pushNotification(
-      notificationFor(
-        'collection',
-        'Accounts handover verified',
-        `${collectionId} is complete and recorded by Accounts.`,
-        'CollectionDetail',
-        collectionId,
-      ),
-    );
     return { success: true, collectionId };
   };
 
-  const markNotificationRead = notificationId => {
-    setNotifications(current =>
-      current.map(notification =>
-        notification.id === notificationId
-          ? { ...notification, read: true }
-          : notification,
-      ),
+  // ── Notifications ─────────────────────────────────────────────
+  const markNotificationRead = async notificationId => {
+    // Optimistic update first; backend call in background.
+    setNotifications(prev =>
+      prev.map(n => (n.id === notificationId || n._id === notificationId) ? { ...n, read: true } : n),
     );
+    setUnreadCount(prev => Math.max(0, prev - 1));
+    await notificationApi.markRead(notificationId).catch(() => {});
   };
 
-  const markAllNotificationsRead = () => {
-    setNotifications(current =>
-      current.map(notification => ({ ...notification, read: true })),
-    );
+  const markAllNotificationsRead = async () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    setUnreadCount(0);
+    await notificationApi.markAllRead().catch(() => {});
   };
 
-  const deleteNotification = notificationId => {
-    setNotifications(current =>
-      current.filter(notification => notification.id !== notificationId),
+  const deleteNotification = async notificationId => {
+    setNotifications(prev =>
+      prev.filter(n => n.id !== notificationId && n._id !== notificationId),
     );
+    setUnreadCount(prev =>
+      Math.max(0, prev - (notifications.find(n => n.id === notificationId && !n.read) ? 1 : 0)),
+    );
+    await notificationApi.delete(notificationId).catch(() => {});
   };
 
-  const clearAllNotifications = () => {
+  const clearAllNotifications = async () => {
+    // Delete each one on the backend (fire-and-forget).
+    const ids = notifications.map(n => n._id || n.id);
     setNotifications([]);
+    setUnreadCount(0);
+    await Promise.allSettled(ids.map(id => notificationApi.delete(id)));
   };
-
-  const unreadCount = notifications.filter(item => !item.read).length;
 
   return (
     <AppContext.Provider
@@ -786,7 +849,7 @@ export const AppProvider = ({ children }) => {
         authLoading,
         restoringSession,
         staff,
-        products: productsSeed,
+        products,
         customers,
         quotations,
         orders,
@@ -796,9 +859,16 @@ export const AppProvider = ({ children }) => {
         collections,
         notifications,
         unreadCount,
+        loadingOrders,
+        loadingInvoices,
+        loadingCustomers,
+        loadingQuotations,
+        loadingDispatches,
+        // actions
         requestLoginOtp,
         verifyLoginOtp,
         logout,
+        loadBusinessData,
         addCustomer,
         createQuotation,
         advanceOrder,
@@ -822,10 +892,9 @@ export const AppProvider = ({ children }) => {
 
 export const useApp = () => {
   const context = useContext(AppContext);
-
-  if (context === undefined) {
-    throw new Error('useApp must be used within AppProvider');
-  }
-
+  if (context === undefined) throw new Error('useApp must be used within AppProvider');
   return context;
 };
+
+// Export mapper for use in detail screens that fetch individual records
+export { mapApiInvoice };

@@ -27,7 +27,7 @@ import {
   SurfaceCard,
   TextField,
 } from '../components';
-import { OTP_PURPOSES } from '../mockData';
+import { OTP_PURPOSES } from '../constants';
 import { colors, formatCurrency, radius, shadow, spacing } from '../theme';
 
 // ─────────────────────────────────────────────────────────────────
@@ -269,13 +269,13 @@ export const CollectionDetailScreen = ({ navigation, route }) => {
   const invoice = invoices.find(item => item.id === collection.invoiceId);
   const payment = payments.find(item => item.id === collection.paymentId);
   const isVerifying = collection.status === 'ACCOUNT_VERIFICATION';
-  const isVerified = collection.status === 'ACCOUNT_VERIFIED';
-  const verificationOtp =
+  const isVerified  = collection.status === 'ACCOUNT_VERIFIED';
+  // Whether an active OTP challenge exists for this collection (no static code —
+  // the accountant simply reads this screen as confirmation).
+  const hasActiveChallenge =
     isVerifying &&
     otpChallenge?.purpose === OTP_PURPOSES.PAYMENT_COLLECTION &&
-    otpChallenge?.collectionId === collection.id
-      ? otpChallenge.code
-      : null;
+    otpChallenge?.collectionId === collection.id;
 
   return (
     <Screen>
@@ -382,30 +382,22 @@ export const CollectionDetailScreen = ({ navigation, route }) => {
         </View>
       ) : null}
 
-      {verificationOtp ? (
+      {hasActiveChallenge ? (
         <View style={s.otpShareCard}>
           <View style={s.otpShareHeader}>
             <Icon color={colors.primary} name="shield-key-outline" size={20} />
-            <Text style={s.otpShareTitle}>Your verification OTP</Text>
+            <Text style={s.otpShareTitle}>Accounts verification in progress</Text>
           </View>
           <Text style={s.otpShareSub}>
-            The accountant is verifying this payment. Read this OTP out to the
-            accountant to confirm the amount was received.
+            Show this screen to the accountant as confirmation that{' '}
+            <Text style={{ fontWeight: '800' }}>{formatCurrency(collection.amount)}</Text>{' '}
+            was received for {collection.invoiceId}. The accountant will enter the
+            6-digit code sent to your registered mobile to complete verification.
           </Text>
-          <View style={s.otpShareCodeRow}>
-            {String(verificationOtp)
-              .split('')
-              .map((digit, index) => (
-                <View key={index} style={s.otpShareDigitBox}>
-                  <Text style={s.otpShareDigit}>{digit}</Text>
-                </View>
-              ))}
-          </View>
           <View style={s.otpShareNote}>
             <Icon color={colors.textMuted} name="information-outline" size={14} />
             <Text style={s.otpShareNoteText}>
-              This code was sent to your registered account. Do not share it with
-              anyone except the verifying accountant.
+              Keep this screen open until the accountant confirms the code.
             </Text>
           </View>
         </View>
@@ -468,7 +460,6 @@ export const CollectionOtpScreen = ({ navigation, route }) => {
   const correctPurpose =
     otpChallenge?.purpose === OTP_PURPOSES.PAYMENT_COLLECTION &&
     otpChallenge?.collectionId === collection.id;
-
   return (
     <SafeAreaView
       edges={['top', 'right', 'bottom', 'left']}
@@ -563,13 +554,6 @@ export const CollectionOtpScreen = ({ navigation, route }) => {
             </Text>
           ) : null}
 
-          <View style={s.otpInfoNote}>
-            <Icon color={colors.info} name="information-outline" size={15} />
-            <Text style={s.otpInfoText}>
-              Static OTP: 246810 · Purpose isolated from Login & Delivery
-            </Text>
-          </View>
-
           <PrimaryButton
             disabled={otp.length !== 6 || !correctPurpose}
             icon="check-decagram"
@@ -577,18 +561,6 @@ export const CollectionOtpScreen = ({ navigation, route }) => {
             style={s.otpVerifyBtn}
             title="Verify Accounts handover"
           />
-          <Pressable
-            accessibilityHint="Fills the six digit demo collection code"
-            accessibilityLabel="Use demo collection OTP 246810"
-            accessibilityRole="button"
-            hitSlop={4}
-            onPress={() => setOtp('246810')}
-            style={({ pressed }) => [
-              s.otpDemoTarget,
-              pressed && s.otpDemoTargetPressed,
-            ]}>
-            <Text style={s.otpDemoLink}>Use demo collection OTP</Text>
-          </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -863,11 +835,6 @@ const s = StyleSheet.create({
   otpDigit: { color: colors.navy, fontSize: 20, fontWeight: '900' },
   hiddenInput: { height: 1, opacity: 0, position: 'absolute', width: 1 },
   otpError: { color: colors.danger, fontSize: 12, marginTop: spacing.md, textAlign: 'center' },
-  otpInfoNote: { alignItems: 'center', alignSelf: 'stretch', backgroundColor: colors.infoSoft, borderRadius: radius.md, flexDirection: 'row', gap: spacing.xs, marginTop: spacing.xl, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
-  otpInfoText: { color: colors.info, flex: 1, fontSize: 11, fontWeight: '700', lineHeight: 16, textAlign: 'center' },
   otpVerifyBtn: { marginTop: spacing.xl, width: '100%' },
-  otpDemoTarget: { alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingHorizontal: spacing.md },
-  otpDemoTargetPressed: { opacity: 0.65 },
-  otpDemoLink: { color: colors.primaryDark, fontSize: 13, fontWeight: '800', textAlign: 'center' },
   flex1Min: { flex: 1, minWidth: 0 },
 });

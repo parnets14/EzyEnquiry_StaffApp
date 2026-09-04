@@ -67,4 +67,27 @@ export const authApi = {
     request('/auth/staff/verify-otp', { method: 'POST', body: { mobile, otp } }),
 };
 
+// Build a ?query string from a params object (skips empty values).
+const toQuery = (params = {}) => {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+};
+
+// Sales Orders (company-scoped, read-only for staff).
+export const orderApi = {
+  list: (params = {}) => request(`/staff/orders${toQuery(params)}`, { auth: true }),
+  get:  id            => request(`/staff/orders/${id}`, { auth: true }),
+};
+
+// Invoices (company-scoped) + record payment (the Pay button).
+export const invoiceApi = {
+  list: (params = {}) => request(`/staff/invoices${toQuery(params)}`, { auth: true }),
+  get:  id            => request(`/staff/invoices/${id}`, { auth: true }),
+  summary: ()         => request('/staff/invoices/summary', { auth: true }),
+  recordPayment: (id, body) =>
+    request(`/staff/invoices/${id}/payment`, { method: 'POST', auth: true, body }),
+};
+
 export default request;

@@ -5,7 +5,7 @@ import React, {
   useState,
 } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { authApi } from './api';
+import { authApi, orderApi, invoiceApi } from './api';
 import { STORAGE_KEYS } from './config';
 import {
   collectionsSeed,
@@ -42,6 +42,81 @@ const notificationFor = (type, title, message, route, entityId) => ({
   route,
   entityId,
 });
+
+// ── Backend → screen-shape mappers ───────────────────────────
+// The screens were built against camelCase mock records. These normalise the
+// snake_case documents the API returns into the same shape.
+const fmtDate = d =>
+  d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+
+const ORDER_STATUS_MAP = {
+  New: 'NEW', 'Pending Approval': 'PROCESSING', Approved: 'PROCESSING',
+  'Picking Started': 'PROCESSING', 'Picking Completed': 'PROCESSING',
+  'Sorting Started': 'PROCESSING', 'Sorting Completed': 'PROCESSING',
+  'Packing Started': 'PROCESSING', 'Packing Completed': 'PROCESSING',
+  'Invoice Generated': 'PROCESSING', 'Ready for Dispatch': 'READY',
+  'Partially Dispatched': 'DISPATCHED', Dispatched: 'DISPATCHED',
+  'In Transit': 'IN_TRANSIT', Delivered: 'DELIVERED', Cancelled: 'CANCELLED',
+};
+
+const mapApiOrder = o => ({
+  id: o.order_code || o._id,
+  _id: o._id,
+  customerId: o.customer_id || '',
+  customerName: o.customer_name || '',
+  productName: o.product_name || '',
+  quantity: o.qty || 0,
+  unit: o.unit || '',
+  rate: o.rate || 0,
+  subtotal: o.amount || 0,
+  gstAmount: o.gst_amount || 0,
+  total: o.total_amount || 0,
+  status: ORDER_STATUS_MAP[o.status] || 'PROCESSING',
+  rawStatus: o.status || '',
+  enquiryCode: o.enquiry_code || '',
+  createdAt: fmtDate(o.created_at),
+  createdByType: o.created_by_type || '',
+  createdByName: o.created_by_name || '',
+  orderDate: fmtDate(o.order_date || o.created_at),
+});
+
+const INV_STATUS_MAP = {
+  Unpaid: 'PENDING', 'Partially Paid': 'PARTIALLY_PAID', Paid: 'PAID',
+  Overdue: 'PENDING', Cancelled: 'CANCELLED',
+};
+
+const mapApiInvoice = inv => {
+  const item = (inv.items || [])[0] || {};
+  const qty = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  return {
+    id: inv.invoice_no || inv._id,
+    _id: inv._id,
+    orderId: inv.order_no || '',
+    dispatchId: '',
+    customerId: inv.customer_id || '',
+    customerName: inv.customer_name || '',
+    productName: item.product_name || '',
+    quantity: qty,
+    unit: item.unit || '',
+    rate: item.rate || 0,
+    subtotal: inv.subtotal || 0,
+    gstAmount: inv.gst_amount || 0,
+    deliveryCharge: (inv.freight_charges || 0) + (inv.other_charges || 0),
+    total: inv.grand_total || 0,
+    paidAmount: inv.paid_amount || 0,
+    balance: inv.balance_due != null ? inv.balance_due : (inv.grand_total || 0) - (inv.paid_amount || 0),
+    status: INV_STATUS_MAP[inv.payment_status] || 'PENDING',
+    dueDate: fmtDate(inv.due_date),
+    invoiceDate: fmtDate(inv.invoice_date),
+    createdByType: inv.created_by_type || '',
+  };
+};
+
+// UI payment mode → backend enum.
+const PAYMENT_MODE_MAP = {
+  CASH: 'Cash', UPI: 'UPI', BANK: 'Bank Transfer', 'BANK TRANSFER': 'Bank Transfer',
+  BANK_TRANSFER: 'Bank Transfer', CHEQUE: 'Cheque', CARD: 'Card',
+};
 
 export const AppProvider = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -92,6 +167,28 @@ export const AppProvider = ({ children }) => {
       active = false;
     };
   }, []);
+
+  // Pull the company's real Sales Orders + Invoices from the backend and
+  // replace the mock seeds. Falls back silently to whatever is loaded.
+  const loadBusinessData = React.useCallback(async () => {
+    const [orderRes, invoiceRes] = await Promise.all([
+      orderApi.list({ limit: 100 }),
+      invoiceApi.list({ limit: 100 }),
+    ]);
+    if (orderRes.success) {
+      const list = orderRes.data?.orders || orderRes.data || [];
+      if (Array.isArray(list)) setOrders(list.map(mapApiOrder));
+    }
+    if (invoiceRes.success) {
+      const list = invoiceRes.data?.invoices || invoiceRes.data || [];
+      if (Array.isArray(list)) setInvoices(list.map(mapApiInvoice));
+    }
+  }, []);
+
+  // Load business data whenever the staff becomes authenticated.
+  useEffect(() => {
+    if (isAuthenticated) loadBusinessData();
+  }, [isAuthenticated, loadBusinessData]);
 
   // Request a login OTP for the mobile Admin registered in HR Employee Mgmt.
   const requestLoginOtp = async mobile => {
@@ -447,12 +544,24 @@ export const AppProvider = ({ children }) => {
     return resumedStatus;
   };
 
-  const recordCollection = details => {
+  const recordCollection = async details => {
     const invoice = invoices.find(item => item.id === details.invoiceId);
     const amount = Number(details.amount);
 
     if (!invoice || amount <= 0 || amount > invoice.balance) {
       return { success: false, message: 'Collection amount exceeds invoice balance.' };
+    }
+
+    // Persist the payment against the real invoice on the backend.
+    if (invoice._id) {
+      const res = await invoiceApi.recordPayment(invoice._id, {
+        amount,
+        payment_mode: PAYMENT_MODE_MAP[String(details.mode || '').toUpperCase()] || 'Cash',
+        reference_no: (details.reference || '').trim(),
+      });
+      if (!res.success) {
+        return { success: false, message: res.message || 'Could not record payment.' };
+      }
     }
 
     const payment = {
@@ -463,10 +572,10 @@ export const AppProvider = ({ children }) => {
       customerName: invoice.customerName,
       amount,
       mode: details.mode,
-      reference: details.reference.trim() || 'Staff collection',
+      reference: (details.reference || '').trim() || 'Staff collection',
       status: 'COLLECTED',
-      date: '27 Aug 2026',
-      createdBy: staffProfile.name,
+      date: fmtDate(new Date()),
+      createdBy: staff.name || staffProfile.name,
     };
     const collection = {
       id: nextNumber(collections, 'COL', 101),

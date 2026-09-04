@@ -1106,7 +1106,9 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
     : 0;
   const isPaid = invoice.balance <= 0;
 
-  const handlePay = () => {
+  const [paying, setPaying] = useState(false);
+
+  const handlePay = async () => {
     const value = Number(amount);
     if (!value || value <= 0) {
       setPayError('Enter a valid amount.');
@@ -1116,17 +1118,19 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
       setPayError('Amount cannot exceed the balance due.');
       return;
     }
-    const result = recordCollection({
+    setPayError('');
+    setPaying(true);
+    const result = await recordCollection({
       invoiceId: invoice.id,
       amount: value,
       mode,
       reference,
     });
+    setPaying(false);
     if (!result.success) {
       setPayError(result.message);
       return;
     }
-    setPayError('');
     setReference('');
     setAmount('');
     Alert.alert(
@@ -1150,8 +1154,9 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
             <PrimaryButton
               icon="cash-plus"
               onPress={handlePay}
+              disabled={paying}
               style={styles.footerPayButton}
-              title={`Pay ${formatCurrency(Number(amount) || 0)}`}
+              title={paying ? 'Processing…' : `Pay ${formatCurrency(Number(amount) || 0)}`}
             />
           </View>
         ) : null

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import { useApp } from '../AppContext';
+import { useApp, useRefresh } from '../AppContext';
 import { invoiceApi } from '../api';
 import { mapApiInvoice } from '../AppContext';
 import {
@@ -31,6 +31,7 @@ import {
 
 export const OrdersScreen = ({ navigation }) => {
   const { orders, unreadCount } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('ALL');
 
@@ -60,10 +61,10 @@ export const OrdersScreen = ({ navigation }) => {
     .reduce((sum, order) => sum + order.total, 0);
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
-        subtitle="Assigned sales orders"
+        subtitle="Only orders assigned to you"
         title="Orders"
         unreadCount={unreadCount}
       />
@@ -178,6 +179,23 @@ export const OrdersScreen = ({ navigation }) => {
                     {order.customerName}
                   </Text>
                   <Text style={styles.orderId}>{order.id}</Text>
+                  {/* Assignment badge */}
+                  {order.assignedToName && (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+                      <Icon color={colors.primary} name="account-outline" size={12} />
+                      <Text style={{ color: colors.primary, fontSize: 10, fontWeight: '600', marginLeft: 4 }}>
+                        Assigned to: {order.assignedToName}
+                      </Text>
+                    </View>
+                  )}
+                  {!order.assignedToName && (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+                      <Icon color={colors.textMuted} name="account-alert-outline" size={12} />
+                      <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '600', marginLeft: 4 }}>
+                        Unassigned
+                      </Text>
+                    </View>
+                  )}
                 </View>
                 <StatusPill status={order.status} />
               </View>
@@ -260,10 +278,14 @@ export const OrdersScreen = ({ navigation }) => {
       ) : (
         <EmptyState
           actionLabel={search ? 'Clear search' : undefined}
-          icon="clipboard-search-outline"
-          message="No assigned sales orders match the selected search and filter."
+          icon="clipboard-account-outline"
+          message={
+            search
+              ? 'No assigned orders match your search.'
+              : 'No orders have been assigned to you yet.\nContact your manager to get orders assigned.'
+          }
           onAction={search ? () => setSearch('') : undefined}
-          title="No orders found"
+          title={search ? 'No results' : 'No orders assigned'}
         />
       )}
     </Screen>
@@ -527,6 +549,7 @@ export const OrderDetailScreen = ({ navigation, route }) => {
 
 export const DispatchesScreen = ({ navigation, route }) => {
   const { dispatches, orders, loadingDispatches } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('ALL');
   const requestedOrder = route.params?.orderId;
@@ -558,7 +581,7 @@ export const DispatchesScreen = ({ navigation, route }) => {
   console.log('DispatchesScreen - Visible after filter:', visible.length);
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack
@@ -881,8 +904,8 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
             </Text>
           </View>
         </View>
-        <InfoRow icon="truck-outline" label="Vehicle" value={dispatch.vehicleNumber} />
-        <InfoRow icon="domain" label="Transport" value={dispatch.transport} />
+        <InfoRow icon="car-outline" label="Vehicle" value={dispatch.vehicleNumber} />
+        <InfoRow icon="truck-fast-outline" label="Transport" value={dispatch.transport} />
         <InfoRow icon="file-document-outline" label="LR number" value={dispatch.lrNumber} />
       </SurfaceCard>
 
@@ -896,20 +919,20 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
             {/* Enhanced delivery summary for completed dispatches */}
             <View style={styles.deliverySummaryBox}>
               <View style={styles.deliverySummaryIcon}>
-                <Icon color={colors.success} name="package-check" size={32} />
+                <Icon color={colors.white} name="check-decagram" size={36} />
               </View>
               <View style={styles.flexText}>
-                <Text style={styles.deliverySummaryTitle}>
+                <Text style={[styles.deliverySummaryTitle, { color: colors.white }]}>
                   Delivered Successfully
                 </Text>
-                <Text style={styles.deliverySummaryDate}>
+                <Text style={[styles.deliverySummaryDate, { color: colors.white }]}>
                   {dispatch.deliveredDate || dispatch.expectedDelivery}
                   {dispatch.deliveredTime ? ` at ${dispatch.deliveredTime}` : ''}
                 </Text>
                 {otpVerified && (
                   <View style={styles.verifiedBadge}>
-                    <Icon color={colors.success} name="shield-check" size={14} />
-                    <Text style={styles.verifiedBadgeText}>OTP Verified</Text>
+                    <Icon color={colors.white} name="shield-check" size={14} />
+                    <Text style={[styles.verifiedBadgeText, { color: colors.white }]}>OTP Verified</Text>
                   </View>
                 )}
               </View>
@@ -1133,6 +1156,7 @@ export const FinanceScreen = ({ navigation }) => {
 
 export const InvoicesScreen = ({ navigation, route }) => {
   const { invoices } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [filter, setFilter] = useState('ALL');
   const customerId = route.params?.customerId;
   const visible = invoices.filter(invoice => {
@@ -1142,7 +1166,7 @@ export const InvoicesScreen = ({ navigation, route }) => {
   });
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack
@@ -1826,7 +1850,7 @@ const TimelineRow = ({ icon, label, value, done, pending, highlight }) => (
       pending && styles.timelineMarkerPending
     ]}>
       <Icon 
-        color={done ? colors.success : pending ? colors.textMuted : colors.primary} 
+        color={done ? colors.white : pending ? colors.textMuted : colors.primary} 
         name={done ? 'check-circle' : icon} 
         size={17} 
       />

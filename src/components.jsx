@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -66,6 +67,8 @@ export const Screen = ({
   keyboardAvoiding = false,
   footer,
   footerStyle,
+  refreshing = false,
+  onRefresh,
 }) => {
   const insets = useSafeAreaInsets();
   const scrollRef = useRef(null);
@@ -93,10 +96,13 @@ export const Screen = ({
     };
   }, []);
 
-  // Extra space so the last fields can always scroll clear of the keyboard,
-  // even on devices where adjustResize does not shrink the viewport. The
-  // footer is lifted separately, so the body only needs the keyboard height.
-  const keyboardInset = keyboardHeight > 0 ? keyboardHeight + spacing.xl : 0;
+  // Extra space so the last fields can always scroll clear of the footer.
+  // On Android, the OS shrinks the window when the keyboard opens (adjustResize),
+  // so we do NOT add keyboard height to the scroll padding — the window is
+  // already smaller. On iOS we need to add it manually.
+  const keyboardInset = keyboardHeight > 0 && Platform.OS === 'ios'
+    ? keyboardHeight + spacing.xl
+    : 0;
   const safeBottomStyle = {
     paddingBottom:
       bottomPaddingFromStyle(contentContainerStyle) +
@@ -188,6 +194,16 @@ export const Screen = ({
       onScroll={e => {
         scrollYRef.current = e.nativeEvent.contentOffset.y;
       }}
+      refreshControl={
+        onRefresh ? (
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={[colors.primary]}
+            tintColor={colors.primary}
+          />
+        ) : undefined
+      }
       scrollEventThrottle={16}
       showsVerticalScrollIndicator={false}
       style={styles.screenBody}>
@@ -226,23 +242,35 @@ export const Screen = ({
     </>
   );
 
-  const useKav = keyboardAvoiding && Platform.OS === 'ios';
+  // KeyboardAvoidingView only on iOS — Android uses adjustResize in AndroidManifest.
+  // On Android, wrapping in KAV with behavior="height" collapses the layout and
+  // shows the navy SafeAreaView background behind the form.
+  const useKav = !!keyboardAvoiding && Platform.OS === 'ios';
 
   return (
     <ScreenScrollContext.Provider value={revealInput}>
-      <SafeAreaView edges={['top']} style={[styles.safeArea, style]}>
+      {/* screenOuter fills the whole screen with app background colour.
+          A separate navy strip covers just the status-bar safe area so the
+          header colour is preserved on every Android device regardless of
+          windowSoftInputMode / keyboard resize behaviour. */}
+      <View style={styles.screenOuter}>
         <StatusBar backgroundColor={colors.navy} barStyle="light-content" />
-        {useKav ? (
-          <KeyboardAvoidingView
-            behavior="padding"
-            {...keyboardProps}
-            style={[styles.fill, keyboardStyle]}>
-            {pageContent}
-          </KeyboardAvoidingView>
-        ) : (
-          pageContent
-        )}
-      </SafeAreaView>
+        {/* Navy top strip for status bar area only */}
+        <SafeAreaView edges={['top']} style={styles.statusBarArea} />
+        {/* Remaining content — no SafeAreaView flex here to avoid resize gap */}
+        <View style={[styles.screenInner, style]}>
+          {useKav ? (
+            <KeyboardAvoidingView
+              behavior="padding"
+              {...keyboardProps}
+              style={[styles.fill, keyboardStyle]}>
+              {pageContent}
+            </KeyboardAvoidingView>
+          ) : (
+            pageContent
+          )}
+        </View>
+      </View>
     </ScreenScrollContext.Provider>
   );
 };
@@ -799,15 +827,14 @@ export const StickyActionBar = ({ children, style, keyboardHeight = 0 }) => {
   const insets = useSafeAreaInsets();
   const keyboardOpen = keyboardHeight > 0;
 
-  // While the keyboard is open, lift the bar above it so the action button
-  // stays visible even when adjustResize does not shrink the window. When
-  // closed, keep the normal safe-area padding.
+  // On iOS only: lift the bar above keyboard when open.
+  // On Android: adjustResize handles window shrinking; no manual lift needed.
   const safeBottomStyle = {
     paddingBottom:
       bottomPaddingFromStyle(style) +
       spacing.md +
       (keyboardOpen ? 0 : insets.bottom),
-    marginBottom: keyboardOpen ? keyboardHeight : 0,
+    marginBottom: keyboardOpen && Platform.OS === 'ios' ? keyboardHeight : 0,
   };
 
   return (
@@ -818,7 +845,10 @@ export const StickyActionBar = ({ children, style, keyboardHeight = 0 }) => {
 };
 
 const styles = StyleSheet.create({
-  safeArea: { backgroundColor: colors.navy, flex: 1 },
+  safeArea:      { flex: 1 },
+  screenOuter:   { backgroundColor: colors.background, flex: 1 },
+  statusBarArea: { backgroundColor: colors.navy },          // navy only for top safe-area inset
+  screenInner:   { backgroundColor: colors.background, flex: 1 }, // white/bg fills rest
   fixedHeader: {
     backgroundColor: colors.navy,
     flexShrink: 0,

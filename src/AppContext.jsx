@@ -92,6 +92,10 @@ const mapApiOrder = (o, allDispatches = []) => {
     orderDate:     fmtDate(o.order_date || o.created_at),
     createdByType: o.created_by_type || '',
     createdByName: o.created_by_name || '',
+    assignedTo:    o.assigned_to ? String(o.assigned_to) : null,
+    assignedToName: o.assigned_to_name || '',
+    assignedDate:  o.assigned_date ? fmtDate(o.assigned_date) : null,
+    assignmentType: o.assignment_type || null,
   };
 };
 
@@ -211,62 +215,96 @@ const mapApiCustomer = c => ({
   lastOrder:    c.last_order_date ? fmtDate(c.last_order_date) : 'No orders yet',
 });
 
-// Quotations
+// Quotations - Updated to handle more backend status values
 const QUOTE_STATUS_MAP = {
-  'Draft': 'PENDING', 'Sent': 'PENDING',
+  'Draft': 'PENDING',
+  'Sent': 'PENDING', 
+  'Pending': 'PENDING',
+  'Responded': 'RESPONDED',
   'Negotiation': 'NEGOTIATION',
-  'Accepted': 'ACCEPTED', 'Rejected': 'REJECTED',
-  'Expired': 'EXPIRED',   'Cancelled': 'CANCELLED',
+  'Accepted': 'ACCEPTED',
+  'Rejected': 'REJECTED',
+  'Expired': 'EXPIRED',
+  'Cancelled': 'CANCELLED',
   'Converted': 'CONVERTED',
 };
 
 const mapApiQuotation = q => {
   const item = (q.items || [])[0] || {};
   return {
-    id:            q.quotation_no  || String(q._id),
-    _id:           String(q._id),
-    createdByType: q.created_by_type === 'Admin' ? 'STAFF' : (q.created_by_type || 'STAFF'),
-    createdByName: q.created_by_name || '',
-    customerId:    String(q.customer_id  || ''),
-    customerName:  q.customer_name  || '',
-    productId:     String(item.product_id || ''),
-    productName:   item.product_name || '',
-    quantity:      Number(item.qty  || 0),
-    unit:          item.unit        || '',
-    rate:          Number(item.rate || 0),
-    discount:      Number(q.discount || 0),
-    gst:           Number(item.gst_percent || 18),
+    id:             q.quotation_no  || String(q._id),
+    _id:            String(q._id),
+    createdByType:  q.created_by_type === 'Admin' ? 'STAFF' : (q.created_by_type || 'STAFF'),
+    createdByName:  q.created_by_name || '',
+    customerId:     String(q.customer_id  || ''),
+    customerName:   q.customer_name  || '',
+    productId:      String(item.product_id || ''),
+    productName:    item.product_name || '',
+    brandName:      item.brand_name    || '',
+    categoryName:   item.category_name || '',
+    size:           item.size          || '',
+    finish:         item.finish        || '',
+    quantity:       Number(item.qty  || 0),
+    unit:           item.unit        || '',
+    rate:           Number(item.rate || 0),
+    discount:       Number(q.discount || item.disc || 0),
+    gst:            Number(item.gst_percent || 18),
     deliveryCharge: Number(q.freight_charges || 0),
-    total:         Number(q.grand_total || 0),
-    wholesaler:    q.supplier_name  || '',
-    status:        QUOTE_STATUS_MAP[q.status] || q.status || 'PENDING',
-    createdAt:     fmtDate(q.created_at),
-    remarks:       q.notes || '',
-    enquiryNo:     q.enquiry_no     || '',
+    total:          Number(q.grand_total || 0),
+    // seller = who will handle this quotation (product owner's company)
+    sellerCompanyId: String(q.seller_company_id || q.company_id || ''),
+    wholesaler:     q.seller_company_name || q.supplier_name || '',
+    status:         QUOTE_STATUS_MAP[q.status] || q.status || 'PENDING',
+    createdAt:      fmtDate(q.created_at),
+    remarks:        q.remarks || q.notes || '',
+    enquiryNo:      q.enquiry_no || '',
   };
 };
 
 // Products
-const mapApiProduct = p => ({
-  id:           String(p._id),
-  _id:          String(p._id),
-  code:         p.code            || '',
-  name:         p.name            || '',
-  brand:        p.brand_name      || p.brand_id?.name || '',
-  category:     p.category_name   || p.category_id?.name || '',
-  subCategory:  p.sub_category_name || '',
-  size:         p.size            || '',
-  finish:       p.finish          || '',
-  color:        p.color           || '',
-  unit:         p.unit            || 'Sq Ft',
-  gst:          p.gst_percent     || 18,
-  mrp:          p.mrp             || 0,
-  rate:         p.dealer_price    || p.retail_price || p.mrp || 0,
-  retailPrice:  p.retail_price    || 0,
-  dealerPrice:  p.dealer_price    || 0,
-  wholesaler:   p.wholesaler_name || '',
-  stock:        p.available_stock || p.current_stock || 0,
-});
+const mapApiProduct = p => {
+  // brand and category may come as populated objects {_id, name} or raw ObjectId strings
+  const brandName    = typeof p.brand_id    === 'object' ? (p.brand_id?.name    || '') : (p.brand_name    || '');
+  const categoryName = typeof p.category_id === 'object' ? (p.category_id?.name || '') : (p.category_name || '');
+  const subCatName   = typeof p.sub_category_id === 'object' ? (p.sub_category_id?.name || '') : (p.sub_category_name || '');
+
+  // Pick best available rate — prefer dealer, then retail, then selling, then mrp
+  const rate = p.dealer_price  || p.retail_price  || p.selling_price ||
+               p.wholesale_rate || p.project_rate  || p.mrp || 0;
+
+  return {
+    id:           String(p._id),
+    _id:          String(p._id),
+    companyId:    String(p.company_id?._id || p.company_id || ''),  // product owner's company
+    companyName:  p.company_id?.name || '',
+    createdByType: p.created_by_type || 'Admin',
+    code:         p.code         || '',
+    name:         p.name         || '',
+    brand:        brandName,
+    category:     categoryName,
+    subCategory:  subCatName,
+    size:         p.size         || '',
+    finish:       p.finish       || '',
+    color:        p.color        || '',
+    unit:         p.unit         || 'Sq Ft',
+    gst:          p.gst_percent  || 18,
+    mrp:          p.mrp          || 0,
+    rate,
+    retailPrice:  p.retail_price  || 0,
+    dealerPrice:  p.dealer_price  || 0,
+    sellingPrice: p.selling_price || 0,
+    wholesaleRate:p.wholesale_rate|| 0,
+    stock:        p.available_stock || p.current_stock || 0,
+    wholesaler:   p.wholesaler_name || p.company_id?.name || '',
+    location:     p.location || '',
+    hsnCode:      p.hsn_code || '',
+    pcsPerBox:    p.pcs_per_box   || null,
+    sqftPerBox:   p.sqft_per_box  || null,
+    tileType:     p.tile_type     || '',
+    grade:        p.grade         || '',
+    isActive:     p.is_active !== false,
+  };
+};
 
 // Notifications
 const mapApiNotification = n => ({
@@ -301,7 +339,8 @@ export const AppProvider = ({ children }) => {
   const [orders,         setOrders]         = useState([]);
   const [dispatches,     setDispatches]     = useState([]);
   const [invoices,       setInvoices]       = useState([]);
-  const [customers,      setCustomers]      = useState([]);
+  const [customers,      setCustomers]      = useState([]);  // filtered — only assigned-order customers
+  const [allCustomers,   setAllCustomers]   = useState([]);  // all company customers — for quotation form
   const [quotations,     setQuotations]     = useState([]);
   const [products,       setProducts]       = useState([]);
   const [notifications,  setNotifications]  = useState([]);
@@ -425,72 +464,191 @@ export const AppProvider = ({ children }) => {
 
       (async () => {
         setLoadingInvoices(true);
-        const res = await invoiceApi.list({ limit: 200 });
-        if (res.success) {
-          const list = Array.isArray(res.data?.invoices) ? res.data.invoices
-                     : Array.isArray(res.data)            ? res.data : [];
-          const mapped = list.map(mapApiInvoice);
-          setInvoices(mapped);
-          // Seed local payments from invoices that have a paid amount already.
-          const seedPayments = mapped
-            .filter(inv => inv.paidAmount > 0)
-            .map(inv => ({
-              id:           `PAY-${inv.id}`,
-              invoiceId:    inv.id,
-              _invoiceId:   inv._id,
-              orderId:      inv.orderId,
-              customerId:   inv.customerId,
-              customerName: inv.customerName,
-              amount:       inv.paidAmount,
-              mode:         '—',
-              reference:    '',
-              status:       inv.status === 'PAID' ? 'VERIFIED' : 'COLLECTED',
-              date:         '',
-              createdBy:    '',
-            }));
-          setPayments(seedPayments);
+        try {
+          console.log('🚀 Calling invoice API: /staff/invoices?limit=200');
+          const res = await invoiceApi.list({ limit: 200 });
+          console.log('💰 Invoice API response:', { success: res.success, count: res.data?.invoices?.length || 0 });
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.invoices) ? res.data.invoices
+                       : Array.isArray(res.data)            ? res.data : [];
+            console.log('✅ Raw invoices loaded:', list.length);
+            if (list.length > 0) {
+              console.log('📊 Sample raw invoice:', list[0]);
+            }
+            const mapped = list.map(mapApiInvoice);
+            console.log('✅ Mapped invoices:', mapped.length);
+            if (mapped.length > 0) {
+              console.log('📊 Sample mapped invoice:', mapped[0]);
+            }
+            setInvoices(mapped);
+            // Seed local payments from invoices that have a paid amount already.
+            const seedPayments = mapped
+              .filter(inv => inv.paidAmount > 0)
+              .map(inv => ({
+                id:           `PAY-${inv.id}`,
+                invoiceId:    inv.id,
+                _invoiceId:   inv._id,
+                orderId:      inv.orderId,
+                customerId:   inv.customerId,
+                customerName: inv.customerName,
+                amount:       inv.paidAmount,
+                mode:         '—',
+                reference:    '',
+                status:       inv.status === 'PAID' ? 'VERIFIED' : 'COLLECTED',
+                date:         '',
+                createdBy:    '',
+              }));
+            setPayments(seedPayments);
+          } else {
+            console.error('❌ Invoices API error:', res.message);
+          }
+        } catch (err) {
+          console.error('❌ Invoices fetch error:', err.message || err);
+        } finally {
+          setLoadingInvoices(false);
         }
-        setLoadingInvoices(false);
       })(),
 
       (async () => {
         setLoadingCustomers(true);
-        const res = await customerApi.list({ limit: 200 });
-        if (res.success) {
-          const list = Array.isArray(res.data?.customers) ? res.data.customers
-                     : Array.isArray(res.data)             ? res.data : [];
-          setCustomers(list.map(mapApiCustomer));
+        try {
+          console.log('🚀 Calling customer API: /staff/customers?limit=200');
+          const res = await customerApi.list({ limit: 200 });
+          console.log('👥 Customer API response:', { success: res.success, count: res.data?.customers?.length || 0 });
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.customers) ? res.data.customers
+                       : Array.isArray(res.data)             ? res.data : [];
+            console.log('✅ Raw customers loaded:', list.length);
+            if (list.length > 0) {
+              console.log('📊 Sample raw customer:', list[0]);
+            }
+            const mapped = list.map(mapApiCustomer);
+            console.log('✅ Mapped customers:', mapped.length);
+            if (mapped.length > 0) {
+              console.log('📊 Sample mapped customer:', mapped[0]);
+            }
+            setCustomers(mapped);
+          } else {
+            console.error('❌ Customers API error:', res.message);
+          }
+        } catch (err) {
+          console.error('❌ Customers fetch error:', err.message || err);
+        } finally {
+          setLoadingCustomers(false);
         }
-        setLoadingCustomers(false);
+      })(),
+
+      // Load ALL company customers (scope=all) for use in the quotation form.
+      // This runs in parallel and does not affect the filtered customers list.
+      (async () => {
+        try {
+          const res = await customerApi.listAll({ limit: 500 });
+          if (res.success) {
+            const list = Array.isArray(res.data?.customers) ? res.data.customers
+                       : Array.isArray(res.data)             ? res.data : [];
+            setAllCustomers(list.map(mapApiCustomer));
+          }
+        } catch (err) {
+          console.error('❌ AllCustomers fetch error:', err.message || err);
+        }
       })(),
 
       (async () => {
         setLoadingQuotations(true);
-        const res = await quotationApi.list({ limit: 200 });
-        if (res.success) {
-          const list = Array.isArray(res.data?.quotations) ? res.data.quotations
-                     : Array.isArray(res.data)              ? res.data : [];
-          setQuotations(list.map(mapApiQuotation));
+        try {
+          console.log('🚀 Calling quotation API: /staff/quotations?limit=200');
+          const res = await quotationApi.list({ limit: 200 });
+          console.log('📋 Quotation API response:', { success: res.success, count: res.data?.quotations?.length || 0 });
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.quotations) ? res.data.quotations
+                       : Array.isArray(res.data)              ? res.data : [];
+            console.log('✅ Raw quotations loaded:', list.length);
+            if (list.length > 0) {
+              console.log('📊 Sample raw quotation:', list[0]);
+            }
+            const mapped = list.map(mapApiQuotation);
+            console.log('✅ Mapped quotations:', mapped.length);
+            if (mapped.length > 0) {
+              console.log('📊 Sample mapped quotation:', mapped[0]);
+            }
+            setQuotations(mapped);
+          } else {
+            console.error('❌ Quotations API error:', res.message);
+          }
+        } catch (err) {
+          console.error('❌ Quotations fetch error:', err.message || err);
+        } finally {
+          setLoadingQuotations(false);
         }
-        setLoadingQuotations(false);
       })(),
 
       (async () => {
-        const res = await productApi.list({ limit: 200 });
-        if (res.success) {
-          const list = Array.isArray(res.data?.products) ? res.data.products
-                     : Array.isArray(res.data)            ? res.data : [];
-          setProducts(list.map(mapApiProduct));
+        try {
+          console.log('🚀 Calling product API: /staff/products?limit=500');
+          const res = await productApi.list({ limit: 500 });
+          console.log('📦 Product API full response:', JSON.stringify({
+            success: res.success,
+            message: res.message,
+            count: res.data?.products?.length,
+            paginationTotal: res.data?.pagination?.total,
+          }));
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.products) ? res.data.products
+                       : Array.isArray(res.data)            ? res.data : [];
+            console.log('✅ Raw products loaded:', list.length);
+            if (list.length > 0) {
+              const s = list[0];
+              console.log('📊 Sample raw product:', JSON.stringify({
+                name: s.name, code: s.code,
+                dealer_price: s.dealer_price, retail_price: s.retail_price,
+                selling_price: s.selling_price, mrp: s.mrp,
+                gst_percent: s.gst_percent, unit: s.unit,
+                brand_id: typeof s.brand_id === 'object' ? s.brand_id?.name : s.brand_id,
+                category_id: typeof s.category_id === 'object' ? s.category_id?.name : s.category_id,
+              }));
+            } else {
+              console.warn('⚠️ No products returned — check company_id matches product records in DB');
+            }
+            const mapped = list.map(mapApiProduct);
+            console.log('✅ Mapped products:', mapped.length);
+            if (mapped.length > 0) {
+              console.log('📊 Sample mapped product:', JSON.stringify({
+                id: mapped[0].id, name: mapped[0].name,
+                rate: mapped[0].rate, gst: mapped[0].gst,
+                brand: mapped[0].brand, category: mapped[0].category,
+              }));
+            }
+            setProducts(mapped);
+          } else {
+            console.error('❌ Products API error:', res.message, 'status:', res.status);
+          }
+        } catch (err) {
+          console.error('❌ Products fetch error:', err.message || err);
         }
       })(),
 
       (async () => {
-        const res = await notificationApi.list({ limit: 50 });
-        if (res.success) {
-          const list = Array.isArray(res.data?.notifications) ? res.data.notifications
-                     : Array.isArray(res.data)                 ? res.data : [];
-          setNotifications(list.map(mapApiNotification));
-          setUnreadCount(res.data?.unreadCount ?? list.filter(n => !n.is_read).length);
+        try {
+          console.log('🚀 Calling notification API: /staff/notifications?limit=50');
+          const res = await notificationApi.list({ limit: 50 });
+          console.log('🔔 Notification API response:', { success: res.success, count: res.data?.notifications?.length || 0 });
+          
+          if (res.success) {
+            const list = Array.isArray(res.data?.notifications) ? res.data.notifications
+                       : Array.isArray(res.data)                 ? res.data : [];
+            console.log('✅ Raw notifications loaded:', list.length);
+            const mapped = list.map(mapApiNotification);
+            setNotifications(mapped);
+            setUnreadCount(res.data?.unreadCount ?? list.filter(n => !n.is_read).length);
+          } else {
+            console.error('❌ Notifications API error:', res.message);
+          }
+        } catch (err) {
+          console.error('❌ Notifications fetch error:', err.message || err);
         }
       })(),
     ]);
@@ -570,6 +728,7 @@ export const AppProvider = ({ children }) => {
     setDispatches([]);
     setInvoices([]);
     setCustomers([]);
+    setAllCustomers([]);
     setQuotations([]);
     setProducts([]);
     setNotifications([]);
@@ -581,25 +740,29 @@ export const AppProvider = ({ children }) => {
   // ── Customers ─────────────────────────────────────────────────
   const addCustomer = async form => {
     const res = await customerApi.create({
-      name:       form.name.trim(),
-      mobile:     form.mobile.trim(),
-      email:      form.email.trim(),
-      gst_number: form.gst.trim() || '',
-      address:    form.address.trim(),
-      city:       form.city.trim(),
-      state:      form.state.trim(),
-      pincode:    form.pincode.trim(),
-      biz_type:   'Customer',
+      name:            form.name.trim(),
+      mobile:          form.mobile.trim(),
+      email:           form.email.trim(),
+      gst_number:      form.gst.trim() || '',
+      address:         form.address.trim(),
+      city:            form.city.trim(),
+      state:           form.state.trim(),
+      pincode:         form.pincode.trim(),
+      biz_type:        'Customer',
+      created_by_type: 'Staff App',
+      created_by_name: staff?.name || '',
     });
     if (!res.success) return { success: false, message: res.message };
     const customer = mapApiCustomer(res.data);
     setCustomers(prev => [customer, ...prev]);
+    setAllCustomers(prev => [customer, ...prev]);
     return customer;
   };
 
   // ── Quotations ────────────────────────────────────────────────
   const createQuotation = async form => {
-    const customer = customers.find(c => c.id === form.customerId || c._id === form.customerId);
+    const customer = allCustomers.find(c => c.id === form.customerId || c._id === form.customerId)
+                  || customers.find(c => c.id === form.customerId || c._id === form.customerId);
     const product  = products.find(p => p.id === form.productId  || p._id === form.productId);
     if (!customer || !product) {
       return { success: false, message: 'Customer or product not found.' };
@@ -610,33 +773,53 @@ export const AppProvider = ({ children }) => {
     const discount = Number(form.discount || 0);
     const gstPct   = Number(form.gst || product.gst || 18);
     const freight  = Number(form.deliveryCharge || 0);
+    const other    = Number(form.otherCharge || 0);
     const taxable  = Math.max(0, qty * rate - discount);
     const gstAmt   = taxable * (gstPct / 100);
-    const grand    = Math.round(taxable + gstAmt + freight);
+    const grand    = Math.round(taxable + gstAmt + freight + other);
 
     const res = await quotationApi.create({
-      customer_name:   customer.name,
+      // seller_company_id = product owner's company (Wholesaler/Retailer/Admin)
+      // This routes the quotation to appear in that company's CRM.
+      seller_company_id: product.companyId || null,
+
       customer_id:     customer._id,
+      customer_name:   customer.name,
       customer_phone:  customer.mobile,
-      created_by_type: 'Admin',  // staff users map to Admin role on the backend
+      customer_email:  customer.email || '',
+      created_by_type: 'Staff App',
       created_by_name: staff?.name || '',
       items: [{
-        product_id:   product._id,
-        product_code: product.code,
-        product_name: product.name,
+        product_id:        product._id,
+        product_code:      product.code,
+        product_name:      product.name,
+        brand_name:        product.brand,
+        category_name:     product.category,
+        sub_category_name: product.subCategory || '',
+        size:              product.size   || '',
+        finish:            product.finish || '',
+        color:             product.color  || '',
+        unit:              product.unit,
+        gst_percent:       gstPct,
+        mrp:               product.mrp         || 0,
+        retail_price:      product.retailPrice  || 0,
+        dealer_price:      product.dealerPrice  || 0,
+        pcs_per_box:       product.pcsPerBox    || null,
+        sqft_per_box:      product.sqftPerBox   || null,
         qty,
         rate,
-        unit:         product.unit,
-        gst_percent:  gstPct,
-        disc:         discount,
+        disc:  discount,
+        total: taxable + gstAmt,
       }],
       discount,
-      subtotal:      taxable,
-      gst_amount:    gstAmt,
-      grand_total:   grand,
+      subtotal:        taxable,
+      gst_amount:      gstAmt,
+      grand_total:     grand,
       freight_charges: freight,
-      notes:         String(form.remarks || '').trim() || 'Created by Staff.',
-      valid_until:   form.validUntil || null,
+      other_charges:   other,
+      remarks:         String(form.remarks || '').trim(),
+      terms:           String(form.terms   || '').trim(),
+      valid_until:     form.validUntil || null,
     });
 
     if (!res.success) return { success: false, message: res.message };
@@ -851,6 +1034,7 @@ export const AppProvider = ({ children }) => {
         staff,
         products,
         customers,
+        allCustomers,
         quotations,
         orders,
         dispatches,
@@ -894,6 +1078,29 @@ export const useApp = () => {
   const context = useContext(AppContext);
   if (context === undefined) throw new Error('useApp must be used within AppProvider');
   return context;
+};
+
+/**
+ * useRefresh — convenience hook for pull-to-refresh on any list screen.
+ *
+ * Usage:
+ *   const { refreshing, onRefresh } = useRefresh();
+ *   <Screen refreshing={refreshing} onRefresh={onRefresh}>
+ */
+export const useRefresh = () => {
+  const { loadBusinessData } = useApp();
+  const [refreshing, setRefreshing] = React.useState(false);
+
+  const onRefresh = React.useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadBusinessData();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadBusinessData]);
+
+  return { refreshing, onRefresh };
 };
 
 // Export mapper for use in detail screens that fetch individual records

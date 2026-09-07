@@ -89,9 +89,10 @@ export const dispatchApi = {
 
 // ── Customers (create + list; scoped to company) ─────────────
 export const customerApi = {
-  list:   (params = {}) => request(`/staff/customers${toQuery(params)}`, { auth: true }),
-  get:    id            => request(`/staff/customers/${id}`, { auth: true }),
-  create: body          => request('/staff/customers', { method: 'POST', auth: true, body }),
+  list:    (params = {}) => request(`/staff/customers${toQuery(params)}`, { auth: true }),
+  listAll: (params = {}) => request(`/staff/customers${toQuery({ ...params, scope: 'all' })}`, { auth: true }),
+  get:     id            => request(`/staff/customers/${id}`, { auth: true }),
+  create:  body          => request('/staff/customers', { method: 'POST', auth: true, body }),
 };
 
 // ── Quotations (list + create; staff creates, admin approves) ─
@@ -103,7 +104,10 @@ export const quotationApi = {
 
 // ── Products (catalog search, read-only) ─────────────────────
 export const productApi = {
-  list: (params = {}) => request(`/staff/products${toQuery(params)}`, { auth: true }),
+  list: (params = {}) => request(
+    `/staff/products${toQuery({ limit: 500, _t: Date.now(), ...params })}`,
+    { auth: true }
+  ),
 };
 
 // ── Notifications ─────────────────────────────────────────────

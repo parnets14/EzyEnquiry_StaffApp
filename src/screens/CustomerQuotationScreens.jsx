@@ -1,17 +1,24 @@
-import React, { useMemo, useState } from 'react';
+﻿import React, { useMemo, useState, useCallback } from 'react';
 import {
   Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
+  SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import DateTimePicker, {
   DateTimePickerAndroid,
 } from '@react-native-community/datetimepicker';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import { useApp } from '../AppContext';
+import { useApp, useRefresh } from '../AppContext';
 import {
   AppHeader,
   ChoiceChips,
@@ -44,6 +51,7 @@ const formatQuotationDate = date =>
 
 export const CustomersScreen = ({ navigation }) => {
   const { customers, unreadCount } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [search, setSearch] = useState('');
   const filteredCustomers = customers.filter(customer => {
     const query = search.toLowerCase();
@@ -56,7 +64,7 @@ export const CustomersScreen = ({ navigation }) => {
   });
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack
@@ -381,16 +389,36 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
     return <MissingRecord navigation={navigation} title="Customer not found" />;
   }
 
-  const customerOrders = orders.filter(item => item.customerId === customer.id);
-  const customerQuotes = quotations.filter(
-    item => item.customerId === customer.id,
-  );
-  const customerInvoices = invoices.filter(
-    item => item.customerId === customer.id,
-  );
-  const customerPayments = payments.filter(
-    item => item.customerId === customer.id,
-  );
+  // Filter related data - ensure ID matching works correctly
+  const customerOrders = orders.filter(item => {
+    // Match both string IDs and potential ObjectId comparisons
+    return String(item.customerId) === String(customer.id) || 
+           String(item.customerId) === String(customer._id);
+  });
+  
+  const customerQuotes = quotations.filter(item => {
+    return String(item.customerId) === String(customer.id) || 
+           String(item.customerId) === String(customer._id);
+  });
+  
+  const customerInvoices = invoices.filter(item => {
+    return String(item.customerId) === String(customer.id) || 
+           String(item.customerId) === String(customer._id);
+  });
+  
+  const customerPayments = payments.filter(item => {
+    return String(item.customerId) === String(customer.id) || 
+           String(item.customerId) === String(customer._id);
+  });
+
+  // Debug logging
+  console.log('CustomerDetailScreen - Customer ID:', customer.id, 'ObjectId:', customer._id);
+  console.log('CustomerDetailScreen - Total quotations:', quotations.length);
+  console.log('CustomerDetailScreen - Filtered quotations:', customerQuotes.length);
+  console.log('CustomerDetailScreen - Total orders:', orders.length);
+  console.log('CustomerDetailScreen - Filtered orders:', customerOrders.length);
+  console.log('CustomerDetailScreen - Total invoices:', invoices.length);
+  console.log('CustomerDetailScreen - Filtered invoices:', customerInvoices.length);
 
   return (
     <Screen>
@@ -571,6 +599,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
 
 export const QuotationsScreen = ({ navigation }) => {
   const { quotations } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [search, setSearch] = useState('');
   const visible = quotations.filter(quotation => {
     const query = search.trim().toLowerCase();
@@ -585,7 +614,7 @@ export const QuotationsScreen = ({ navigation }) => {
   });
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack
@@ -726,213 +755,554 @@ export const QuotationsScreen = ({ navigation }) => {
   );
 };
 
+// ─────────────────────────────────────────────────────────────
+// CUSTOMER PICKER MODAL
+// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// QUOTATION FORM SCREEN
+// Inline search for customer + product using FlatList as the form container
+// so keyboard never hides the results.
+// ─────────────────────────────────────────────────────────────────────────────
 export const QuotationFormScreen = ({ navigation, route }) => {
-  const { createQuotation, customers, products } = useApp();
-  const routeCustomer = customers.find(
-    item => item.id === route.params?.customerId,
-  );
-  const [form, setForm] = useState({
-    customerId: routeCustomer?.id || '',
-    productId: '',
-    quantity: '20',
-    rate: '',
-    discount: '0',
-    gst: '18',
-    deliveryCharge: '500',
-    otherCharge: '0',
-    remarks: '',
-    terms: 'Prices are subject to change. GST extra as applicable.',
-  });
-  const [customerSearch, setCustomerSearch] = useState(
-    routeCustomer?.name || '',
-  );
-  const [customerResultsVisible, setCustomerResultsVisible] = useState(false);
-  const [productSearch, setProductSearch] = useState('');
-  const [productResultsVisible, setProductResultsVisible] = useState(false);
-  const [validUntil, setValidUntil] = useState(() => {
-    const date = new Date();
-    date.setDate(date.getDate() + 30);
-    return date;
-  });
-  const [showIosDatePicker, setShowIosDatePicker] = useState(false);
-  const [error, setError] = useState('');
-  const selectedCustomer = customers.find(item => item.id === form.customerId);
-  const selectedProduct = products.find(item => item.id === form.productId);
+  const { createQuotation, allCustomers, products } = useApp();
+  const routeCustomer = allCustomers.find(c => c.id === route.params?.customerId);
 
+  // ── Form state ──────────────────────────────────────────────
+  const [form, setForm] = useState({
+    customerId:     routeCustomer?.id || '',
+    productId:      '',
+    quantity:       '1',
+    rate:           '',   // auto-set from product.dealerPrice, not user-editable
+    discount:       '0',
+    gst:            '18', // auto-set from product.gst_percent, not user-editable
+    deliveryCharge: '0',
+    otherCharge:    '0',
+    remarks:        '',
+    terms:          'Prices are subject to change. GST extra as applicable.',
+  });
+
+  // ── Search state ─────────────────────────────────────────────
+  const [customerQuery, setCustomerQuery] = useState(routeCustomer?.name || '');
+  const [productQuery,  setProductQuery]  = useState('');
+  const [showCustList,  setShowCustList]  = useState(false);
+  const [showProdList,  setShowProdList]  = useState(false);
+
+  // ── Other state ──────────────────────────────────────────────
+  const [validUntil,        setValidUntil]        = useState(() => { const d = new Date(); d.setDate(d.getDate() + 30); return d; });
+  const [showIosDatePicker, setShowIosDatePicker] = useState(false);
+  const [error,             setError]             = useState('');
+  const [saving,            setSaving]            = useState(false);
+
+  const selectedCustomer = allCustomers.find(c => c.id === form.customerId);
+  const selectedProduct  = products.find(p => p.id === form.productId);
+
+  const update = (field, value) => { setForm(cur => ({ ...cur, [field]: value })); setError(''); };
+
+  // ── Filtered lists ───────────────────────────────────────────
   const filteredCustomers = useMemo(() => {
-    const query = customerSearch.trim().toLowerCase();
-    if (!query) {
-      return customers;
-    }
-    return customers.filter(customer =>
-      [
-        customer.name,
-        customer.id,
-        customer.mobile,
-        customer.city,
-        customer.gst,
-      ].some(value => String(value || '').toLowerCase().includes(query)),
-    );
-  }, [customerSearch, customers]);
+    const q = customerQuery.trim().toLowerCase();
+    if (!q) return allCustomers.slice(0, 30);
+    return allCustomers.filter(c =>
+      [c.name, c.id, c.mobile, c.city].some(v => String(v || '').toLowerCase().includes(q))
+    ).slice(0, 30);
+  }, [customerQuery, allCustomers]);
 
   const filteredProducts = useMemo(() => {
-    const query = productSearch.trim().toLowerCase();
-    if (!query) {
-      return products;
-    }
-    return products.filter(product =>
-      [
-        product.name,
-        product.code,
-        product.brand,
-        product.category,
-        product.size,
-        product.finish,
-        product.wholesaler,
-        product.location,
-      ].some(value => String(value || '').toLowerCase().includes(query)),
-    );
-  }, [productSearch, products]);
+    const q = productQuery.trim().toLowerCase();
+    if (!q) return products.slice(0, 30);
+    return products.filter(p =>
+      [p.name, p.code, p.brand, p.category, p.size].some(v => String(v || '').toLowerCase().includes(q))
+    ).slice(0, 30);
+  }, [productQuery, products]);
 
-  const quotationDate = useMemo(
-    () => formatQuotationDate(new Date()),
-    [],
-  );
-  const minimumValidUntil = useMemo(() => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    return date;
-  }, []);
-
-  const update = (field, value) => {
-    setForm(current => ({ ...current, [field]: value }));
-    setError('');
-  };
-
-  const searchCustomers = value => {
-    setCustomerSearch(value);
-    setCustomerResultsVisible(true);
-    update('customerId', '');
-  };
-
-  const chooseCustomer = customer => {
-    setCustomerSearch(customer.name);
-    setCustomerResultsVisible(false);
-    update('customerId', customer.id);
-  };
-
-  const searchProducts = value => {
-    setProductSearch(value);
-    setProductResultsVisible(true);
-    setForm(current => ({
-      ...current,
-      productId: '',
-      rate: '',
-      gst: '18',
-    }));
-    setError('');
-  };
-
-  const chooseProduct = product => {
-    if (!product) {
-      return;
-    }
-    setProductSearch(product.name);
-    setProductResultsVisible(false);
-    setForm(current => ({
-      ...current,
-      productId: product.id,
-      rate: String(product.rate),
-      gst: String(product.gst),
-    }));
-    setError('');
-  };
-
-  const selectValidUntil = date => {
-    setValidUntil(date);
-    setError('');
-  };
-
-  const openValidUntilPicker = () => {
+  // ── Date picker ──────────────────────────────────────────────
+  const minimumValidUntil = useMemo(() => { const d = new Date(); d.setHours(0,0,0,0); return d; }, []);
+  const openDatePicker = () => {
     if (Platform.OS === 'android') {
       DateTimePickerAndroid.open({
-        display: 'default',
-        minimumDate: minimumValidUntil,
-        mode: 'date',
-        onChange: (event, date) => {
-          if (event.type === 'set' && date) {
-            selectValidUntil(date);
-          }
-        },
+        display: 'default', minimumDate: minimumValidUntil, mode: 'date',
+        onChange: (e, d) => { if (e.type === 'set' && d) setValidUntil(d); },
         value: validUntil,
       });
-      return;
-    }
-    setShowIosDatePicker(true);
+    } else { setShowIosDatePicker(true); }
   };
 
+  // ── Totals ───────────────────────────────────────────────────
   const totals = useMemo(() => {
-    const amount = Number(form.quantity || 0) * Number(form.rate || 0);
-    const discount = Number(form.discount || 0);
-    const taxable = Math.max(0, amount - discount);
-    const gstAmount = taxable * (Number(form.gst || 0) / 100);
-    const itemTotal = taxable + gstAmount;
-    const deliveryCharge = Number(form.deliveryCharge || 0);
-    const otherCharge = Number(form.otherCharge || 0);
-    return {
-      amount,
-      discount,
-      gstAmount,
-      itemTotal,
-      taxable,
-      grandTotal: Math.round(itemTotal + deliveryCharge + otherCharge),
-    };
+    const qty      = Number(form.quantity || 0);
+    const rate     = Number(form.rate || 0);     // auto-set from product dealer price
+    const disc     = Number(form.discount || 0);
+    const gstPct   = Number(form.gst || 18);     // auto-set from product gst_percent
+    const amount   = qty * rate;
+    const taxable   = Math.max(0, amount - disc);
+    const gstAmt    = taxable * (gstPct / 100);
+    const itemTotal = taxable + gstAmt;
+    const delivery  = Number(form.deliveryCharge || 0);
+    const other     = Number(form.otherCharge || 0);
+    return { amount, discount: disc, taxable, gstAmount: gstAmt, itemTotal, grandTotal: Math.round(itemTotal + delivery + other) };
   }, [form]);
 
-  const save = () => {
-    if (
-      !selectedCustomer ||
-      !selectedProduct ||
-      Number(form.quantity) <= 0 ||
-      Number(form.rate) <= 0
-    ) {
-      setError(
-        'Select a customer and product, then enter valid quantity and rate.',
-      );
+  // ── Save ─────────────────────────────────────────────────────
+  const save = async () => {
+    if (!selectedCustomer || !selectedProduct || Number(form.quantity) <= 0 || Number(form.rate) <= 0) {
+      setError('Select a customer and product, then enter valid quantity and rate.');
       return;
     }
+    setSaving(true);
+    const result = await createQuotation({ ...form, validUntil: formatQuotationDate(validUntil) });
+    setSaving(false);
+    if (!result || result.success === false) {
+      setError(result?.message || 'Could not save quotation. Try again.');
+      return;
+    }
+    navigation.replace('QuotationDetail', { id: result.id, created: true });
+  };
 
-    const quotation = createQuotation({
-      ...form,
-      validUntil: formatQuotationDate(validUntil),
-    });
-    navigation.replace('QuotationDetail', { id: quotation.id, created: true });
+  // ── FlatList sections ─────────────────────────────────────────
+  // We build the "form" as a flat array of section keys so the entire page
+  // including search results lives in one scrollable FlatList. When the
+  // keyboard opens, Android adjustResize shrinks the list — results stay visible.
+
+  const sections = useMemo(() => {
+    const s = ['header', 'info', 'customer_label', 'customer_search'];
+    if (showCustList) {
+      filteredCustomers.forEach(c => s.push(`cust_${c.id}`));
+      if (filteredCustomers.length === 0) s.push('cust_empty');
+    }
+    if (selectedCustomer) s.push('customer_detail');
+    s.push('product_label', 'product_search');
+    if (showProdList) {
+      filteredProducts.forEach(p => s.push(`prod_${p.id}`));
+      if (filteredProducts.length === 0) s.push('prod_empty');
+    }
+    if (selectedProduct) {
+      s.push('product_detail', 'pricing', 'calc');
+    }
+    s.push('totals', 'remarks', 'footer_spacer');
+    return s;
+  }, [showCustList, showProdList, filteredCustomers, filteredProducts, selectedCustomer, selectedProduct, form, totals, error]);
+
+  const renderItem = ({ item: key }) => {
+    // ── Header / back ──
+    if (key === 'header') return null; // handled by ListHeaderComponent
+
+    // ── Info card ──
+    if (key === 'info') return (
+      <View style={[styles.quoteFormCard, styles.quoteInfoCard]}>
+        <Text style={[styles.quoteSectionLabel, styles.quoteSectionOrange]}>QUOTATION INFORMATION</Text>
+        <View style={styles.quoteInfoGrid}>
+          {[['Quotation Number','Auto-generated'],['Enquiry','Staff direct'],['Quotation Date', formatQuotationDate(new Date())]].map(([l,v]) => (
+            <View key={l} style={styles.quoteInfoTile}>
+              <Text style={styles.quoteInfoLabel}>{l}</Text>
+              <Text style={styles.quoteInfoValue}>{v}</Text>
+            </View>
+          ))}
+          <Pressable accessibilityHint="Opens the date picker" accessibilityRole="button" onPress={openDatePicker}
+            style={({ pressed }) => [styles.quoteInfoTile, styles.quoteDatePickerTile, pressed && styles.cardPressed]}>
+            <Text style={styles.quoteInfoLabel}>Valid Until</Text>
+            <View style={styles.quoteDateValueRow}>
+              <Text style={styles.quoteInfoValue}>{formatQuotationDate(validUntil)}</Text>
+              <Icon color={colors.primary} name="calendar-month" size={19} />
+            </View>
+            <Text style={styles.quoteDateHint}>Tap to select date</Text>
+          </Pressable>
+        </View>
+        {Platform.OS === 'ios' && showIosDatePicker ? (
+          <View style={styles.quoteIosDatePicker}>
+            <DateTimePicker display="inline" minimumDate={minimumValidUntil} mode="date"
+              onChange={(e, d) => { if (e.type === 'set' && d) setValidUntil(d); }} value={validUntil} />
+            <PrimaryButton onPress={() => setShowIosDatePicker(false)} size="compact" title="Done" />
+          </View>
+        ) : null}
+        <View style={styles.quoteAutoNote}>
+          <Icon color={colors.primary} name="information-outline" size={16} />
+          <Text style={styles.quoteAutoNoteText}>Quotation number is created automatically when you save.</Text>
+        </View>
+      </View>
+    );
+
+    // ── Customer section label ──
+    if (key === 'customer_label') return (
+      <View style={qfStyles.sectionLabel}>
+        <Icon color="#2563EB" name="account-outline" size={16} />
+        <Text style={qfStyles.sectionLabelText}>CUSTOMER</Text>
+        {selectedCustomer ? <View style={qfStyles.selectedBadge}><Text style={qfStyles.selectedBadgeText}>✓ Selected</Text></View> : <Text style={qfStyles.requiredBadge}>Required</Text>}
+      </View>
+    );
+
+    // ── Customer search input ──
+    if (key === 'customer_search') return (
+      <View style={qfStyles.searchBox}>
+        <Icon color={showCustList ? colors.primary : colors.textMuted} name="magnify" size={20} style={qfStyles.searchBoxIcon} />
+        <TextInput
+          style={qfStyles.searchBoxInput}
+          value={customerQuery}
+          onChangeText={v => {
+            setCustomerQuery(v);
+            setShowCustList(true);
+            update('customerId', '');
+          }}
+          onFocus={() => setShowCustList(true)}
+          placeholder={selectedCustomer ? selectedCustomer.name : 'Type to search customer…'}
+          placeholderTextColor={selectedCustomer ? colors.text : colors.textMuted}
+          returnKeyType="search"
+          autoCapitalize="words"
+        />
+        {selectedCustomer && !showCustList ? (
+          <Icon color={colors.success} name="check-circle" size={20} style={qfStyles.searchBoxIcon} />
+        ) : customerQuery.length > 0 ? (
+          <Pressable onPress={() => { setCustomerQuery(''); update('customerId', ''); }}>
+            <Icon color={colors.textMuted} name="close-circle-outline" size={20} style={qfStyles.searchBoxIcon} />
+          </Pressable>
+        ) : null}
+      </View>
+    );
+
+    // ── Customer result rows ──
+    if (key.startsWith('cust_') && key !== 'cust_empty') {
+      const c = allCustomers.find(x => x.id === key.replace('cust_',''));
+      if (!c) return null;
+      return (
+        <Pressable
+          key={key}
+          onPress={() => {
+            update('customerId', c.id);
+            setCustomerQuery(c.name);
+            setShowCustList(false);
+          }}
+          style={({ pressed }) => [qfStyles.resultRow, pressed && { backgroundColor: '#F0F7FF' }]}>
+          <View style={qfStyles.resultAvatar}>
+            <Text style={qfStyles.resultAvatarText}>{c.name.charAt(0)}</Text>
+          </View>
+          <View style={qfStyles.resultBody}>
+            <Text style={qfStyles.resultTitle} numberOfLines={1}>{c.name}</Text>
+            <Text style={qfStyles.resultMeta} numberOfLines={1}>{c.mobile} · {c.city}</Text>
+          </View>
+          <Icon color={colors.primary} name="chevron-right" size={18} />
+        </Pressable>
+      );
+    }
+
+    if (key === 'cust_empty') return (
+      <View style={qfStyles.noResults}>
+        <Text style={qfStyles.noResultsText}>No customers match "{customerQuery}"</Text>
+      </View>
+    );
+
+    // ── Selected customer detail ──
+    if (key === 'customer_detail' && selectedCustomer) return (
+      <View style={qfStyles.selectedCard}>
+        <View style={qfStyles.selectedCardTop}>
+          <View style={[qfStyles.resultAvatar, { backgroundColor: '#EAF3FF' }]}>
+            <Text style={[qfStyles.resultAvatarText, { color: '#2563EB' }]}>{selectedCustomer.name.charAt(0)}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={qfStyles.selectedCardName}>{selectedCustomer.name}</Text>
+            <Text style={qfStyles.resultMeta}>{selectedCustomer.mobile} · {selectedCustomer.city}</Text>
+          </View>
+          <Pressable onPress={() => { setShowCustList(true); setCustomerQuery(''); update('customerId', ''); }}
+            style={qfStyles.changeBtn}><Text style={qfStyles.changeBtnText}>Change</Text></Pressable>
+        </View>
+        <View style={styles.quoteCustomerDetailGrid}>
+          {[
+            ['Mobile', selectedCustomer.mobile, 'phone-outline'],
+            ['Email', selectedCustomer.email || '—', 'email-outline'],
+            ['GSTIN', selectedCustomer.gst || '—', 'identifier'],
+            ['Location', `${selectedCustomer.city}, ${selectedCustomer.state}`, 'map-marker-outline'],
+          ].map(([l, v, ic]) => (
+            <View key={l} style={styles.quoteCustomerDetailTile}>
+              <Icon color="#2563EB" name={ic} size={16} />
+              <View style={styles.quoteCustomerDetailCopy}>
+                <Text style={styles.quoteCustomerDetailLabel}>{l}</Text>
+                <Text style={styles.quoteCustomerDetailValue} numberOfLines={2}>{v}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      </View>
+    );
+
+    // ── Product section label ──
+    if (key === 'product_label') return (
+      <View style={[qfStyles.sectionLabel, { marginTop: spacing.md }]}>
+        <Icon color={colors.primary} name="package-variant" size={16} />
+        <Text style={qfStyles.sectionLabelText}>PRODUCT</Text>
+        {selectedProduct ? <View style={qfStyles.selectedBadge}><Text style={qfStyles.selectedBadgeText}>✓ Selected</Text></View> : <Text style={qfStyles.requiredBadge}>Required</Text>}
+      </View>
+    );
+
+    // ── Product search input ──
+    if (key === 'product_search') return (
+      <View style={qfStyles.searchBox}>
+        <Icon color={showProdList ? colors.primary : colors.textMuted} name="magnify" size={20} style={qfStyles.searchBoxIcon} />
+        <TextInput
+          style={qfStyles.searchBoxInput}
+          value={productQuery}
+          onChangeText={v => {
+            setProductQuery(v);
+            setShowProdList(true);
+            update('productId', '');
+          }}
+          onFocus={() => setShowProdList(true)}
+          placeholder={selectedProduct ? selectedProduct.name : 'Type to search product…'}
+          placeholderTextColor={selectedProduct ? colors.text : colors.textMuted}
+          returnKeyType="search"
+          autoCapitalize="words"
+        />
+        {selectedProduct && !showProdList ? (
+          <Icon color={colors.success} name="check-circle" size={20} style={qfStyles.searchBoxIcon} />
+        ) : productQuery.length > 0 ? (
+          <Pressable onPress={() => { setProductQuery(''); update('productId', ''); }}>
+            <Icon color={colors.textMuted} name="close-circle-outline" size={20} style={qfStyles.searchBoxIcon} />
+          </Pressable>
+        ) : null}
+      </View>
+    );
+
+    // ── Product result rows ──
+    if (key.startsWith('prod_') && key !== 'prod_empty') {
+      const p = products.find(x => x.id === key.replace('prod_',''));
+      if (!p) return null;
+      return (
+        <Pressable
+          key={key}
+          onPress={() => {
+            // rate = dealer_price (or fallback to best available price)
+            const autoRate = p.dealer_price || p.retail_price || p.selling_price || p.mrp || 0;
+            setForm(cur => ({
+              ...cur,
+              productId: p.id,
+              rate:      String(autoRate),
+              gst:       String(p.gst_percent || p.gst || 18),
+            }));
+            setProductQuery(p.name);
+            setShowProdList(false);
+            setError('');
+          }}
+          style={({ pressed }) => [qfStyles.resultRow, pressed && { backgroundColor: '#FFF5EE' }]}>
+          <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
+            <Icon color={colors.primary} name="package-variant" size={16} />
+          </View>
+          <View style={qfStyles.resultBody}>
+            <Text style={qfStyles.resultTitle} numberOfLines={1}>{p.name}</Text>
+            <Text style={qfStyles.resultMeta} numberOfLines={1}>
+              {[p.code, p.brand, p.category, p.size].filter(Boolean).join(' · ')}
+            </Text>
+            {p.companyName ? (
+              <Text style={[qfStyles.resultMeta, { color: '#7C3AED', fontSize: 10 }]}>
+                {p.companyName} · {p.createdByType || 'Admin'}
+              </Text>
+            ) : null}
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={[qfStyles.resultTitle, { color: colors.primary, fontSize: 13 }]}>
+              {formatCurrency(p.dealerPrice || p.rate)}
+            </Text>
+            <Text style={qfStyles.resultMeta}>{p.stock} {p.unit}</Text>
+          </View>
+        </Pressable>
+      );
+    }
+
+    if (key === 'prod_empty') return (
+      <View style={qfStyles.noResults}>
+        <Text style={qfStyles.noResultsText}>No products match "{productQuery}"</Text>
+      </View>
+    );
+
+    // ── Selected product detail ──
+    if (key === 'product_detail' && selectedProduct) return (
+      <View style={qfStyles.selectedCard}>
+        {/* Top: name + change */}
+        <View style={qfStyles.selectedCardTop}>
+          <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
+            <Icon color={colors.primary} name="package-variant" size={18} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={qfStyles.selectedCardName}>{selectedProduct.name}</Text>
+            <Text style={qfStyles.resultMeta}>{selectedProduct.code}{selectedProduct.brand ? ` · ${selectedProduct.brand}` : ''}</Text>
+          </View>
+          <Pressable onPress={() => { setShowProdList(true); setProductQuery(''); update('productId', ''); }}
+            style={qfStyles.changeBtn}><Text style={qfStyles.changeBtnText}>Change</Text></Pressable>
+        </View>
+
+        {/* Product owner badge */}
+        {selectedProduct.companyName ? (
+          <View style={qfStyles.ownerBadge}>
+            <Icon color={
+              selectedProduct.createdByType === 'Wholesaler' ? '#7C3AED' :
+              selectedProduct.createdByType === 'Retailer'   ? '#0369A1' : colors.primary
+            } name="domain" size={13} />
+            <Text style={qfStyles.ownerBadgeText}>
+              {selectedProduct.companyName} · {selectedProduct.createdByType || 'Admin'}
+            </Text>
+          </View>
+        ) : null}
+
+        {/* All product details grid */}
+        <View style={qfStyles.productDetailGrid}>
+          {[
+            ['Category',    selectedProduct.category],
+            ['Sub-Category',selectedProduct.subCategory],
+            ['Brand',       selectedProduct.brand],
+            ['Size',        selectedProduct.size],
+            ['Finish',      selectedProduct.finish],
+            ['Color',       selectedProduct.color],
+            ['Tile Type',   selectedProduct.tileType],
+            ['Grade',       selectedProduct.grade],
+            ['Unit',        selectedProduct.unit],
+            ['HSN Code',    selectedProduct.hsnCode],
+            ['Pcs/Box',     selectedProduct.pcsPerBox ? String(selectedProduct.pcsPerBox) : null],
+            ['Sqft/Box',    selectedProduct.sqftPerBox ? String(selectedProduct.sqftPerBox) : null],
+          ].filter(([, v]) => v).map(([label, value]) => (
+            <View key={label} style={qfStyles.productDetailItem}>
+              <Text style={qfStyles.productDetailLabel}>{label}</Text>
+              <Text style={qfStyles.productDetailValue} numberOfLines={1}>{value}</Text>
+            </View>
+          ))}
+        </View>
+
+        {/* Stock + pricing info */}
+        <View style={styles.quoteInventoryBanner}>
+          <View style={styles.quoteInventoryIcon}><Icon color={colors.success} name="warehouse" size={18} /></View>
+          <View style={styles.quoteInventoryCopy}>
+            <Text style={styles.quoteInventoryTitle}>{selectedProduct.stock} {selectedProduct.unit} in stock</Text>
+            <Text style={styles.quoteInventoryText}>
+              Dealer: {formatCurrency(selectedProduct.dealerPrice || selectedProduct.rate)}
+              {selectedProduct.mrp ? `  ·  MRP: ${formatCurrency(selectedProduct.mrp)}` : ''}
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+
+  // ── Pricing fields — only Qty and Discount are editable.
+  // Rate and GST are auto-filled from product and locked.
+    if (key === 'pricing' && selectedProduct) return (
+      <View style={qfStyles.pricingCard}>
+        <Text style={styles.quotePricingLabel}>ITEM PRICING</Text>
+
+        {/* Editable: Qty + Discount only */}
+        <View style={styles.numericGrid}>
+          <View style={styles.numericField}>
+            <TextField
+              keyboardType="number-pad"
+              label={`Quantity (${selectedProduct.unit})`}
+              onChangeText={v => update('quantity', v.replace(/\D/g, ''))}
+              placeholder="0"
+              required
+              value={form.quantity}
+            />
+          </View>
+          <View style={styles.numericField}>
+            <TextField
+              keyboardType="number-pad"
+              label="Discount (₹)"
+              onChangeText={v => update('discount', v.replace(/\D/g, ''))}
+              placeholder="0"
+              prefix="₹"
+              value={form.discount}
+            />
+          </View>
+        </View>
+
+        {/* Read-only: Rate and GST from product */}
+        <View style={qfStyles.autoFilledRow}>
+          <View style={qfStyles.autoFilledItem}>
+            <Text style={qfStyles.autoFilledLabel}>DEALER RATE</Text>
+            <Text style={qfStyles.autoFilledValue}>{formatCurrency(selectedProduct.dealerPrice || selectedProduct.rate)}</Text>
+            <Text style={qfStyles.autoFilledHint}>from product</Text>
+          </View>
+          <View style={qfStyles.autoFilledDivider} />
+          <View style={qfStyles.autoFilledItem}>
+            <Text style={qfStyles.autoFilledLabel}>GST</Text>
+            <Text style={qfStyles.autoFilledValue}>{selectedProduct.gst}%</Text>
+            <Text style={qfStyles.autoFilledHint}>from product</Text>
+          </View>
+          <View style={qfStyles.autoFilledDivider} />
+          <View style={qfStyles.autoFilledItem}>
+            <Text style={qfStyles.autoFilledLabel}>MRP</Text>
+            <Text style={qfStyles.autoFilledValue}>{formatCurrency(selectedProduct.mrp)}</Text>
+            <Text style={qfStyles.autoFilledHint}>max retail</Text>
+          </View>
+        </View>
+      </View>
+    );
+
+    // ── Calc summary ──
+    if (key === 'calc' && selectedProduct) return (
+      <View style={styles.quoteCalculationGrid}>
+        {[
+          ['Qty',         `${form.quantity||0} ${selectedProduct.unit}`,              '#2563EB'],
+          ['Dealer Rate', formatCurrency(selectedProduct.dealerPrice || selectedProduct.rate), colors.navy],
+          ['Disc',        formatCurrency(totals.discount),                             '#D97706'],
+          ['GST',         formatCurrency(totals.gstAmount),                            '#7C3AED'],
+          ['Total',       formatCurrency(totals.itemTotal),                            colors.primary],
+        ].map(([l,v,c]) => (
+          <View key={l} style={styles.quoteCalculationCell}>
+            <Text style={styles.quoteCalculationLabel}>{l}</Text>
+            <Text style={[styles.quoteCalculationValue,{color:c}]}>{v}</Text>
+          </View>
+        ))}
+      </View>
+    );
+
+    // ── Totals card ──
+    if (key === 'totals') return (
+      <View style={styles.quoteTotalsCard}>
+        <TextField keyboardType="number-pad" label="Freight Charges"
+          onChangeText={v => update('deliveryCharge', v.replace(/\D/g,''))}
+          placeholder="0" prefix="₹" value={form.deliveryCharge} />
+        <TextField keyboardType="number-pad" label="Other Charges"
+          onChangeText={v => update('otherCharge', v.replace(/\D/g,''))}
+          placeholder="0" prefix="₹" value={form.otherCharge} />
+        {[
+          ['Taxable subtotal', formatCurrency(totals.taxable)],
+          [`GST (${form.gst||0}%)`, formatCurrency(totals.gstAmount)],
+          ['Subtotal + GST',   formatCurrency(totals.itemTotal)],
+          ['Freight',          formatCurrency(Number(form.deliveryCharge||0))],
+          ['Other',            formatCurrency(Number(form.otherCharge||0))],
+        ].map(([l,v]) => (
+          <View key={l} style={styles.quoteTotalsRow}>
+            <Text style={styles.quoteTotalsLabel}>{l}</Text>
+            <Text style={styles.quoteTotalsValue}>{v}</Text>
+          </View>
+        ))}
+        <View style={styles.quoteTotalsDivider} />
+        <View style={styles.quoteGrandTotalRow}>
+          <Text style={styles.quoteGrandTotalLabel}>GRAND TOTAL</Text>
+          <Text style={styles.quoteGrandTotalValue}>{formatCurrency(totals.grandTotal)}</Text>
+        </View>
+      </View>
+    );
+
+    // ── Remarks ──
+    if (key === 'remarks') return (
+      <View style={[styles.quoteFormCard, styles.quoteRemarksCard]}>
+        <Text style={[styles.quoteSectionLabel, styles.quoteSectionMuted]}>REMARKS & TERMS</Text>
+        <TextField autoCapitalize="sentences" label="Remarks" multiline
+          onChangeText={v => update('remarks', v)}
+          placeholder="Add internal or customer remarks" value={form.remarks} />
+        <TextField autoCapitalize="sentences" label="Terms & Conditions" multiline
+          onChangeText={v => update('terms', v)}
+          placeholder="Add quotation terms and conditions" value={form.terms} />
+        <View style={styles.quoteTermsNote}>
+          <Icon color={colors.textMuted} name="shield-check-outline" size={16} />
+          <Text style={styles.quoteTermsNoteText}>Price and availability are subject to final Admin approval.</Text>
+        </View>
+      </View>
+    );
+
+    // ── Footer spacer ──
+    if (key === 'footer_spacer') return <View style={{ height: 120 }} />;
+
+    return null;
   };
 
   return (
-    <Screen
-      footer={
-        <View>
-          <View style={styles.footerEstimate}>
-            <View>
-              <Text style={styles.footerEstimateLabel}>GRAND TOTAL</Text>
-              <Text style={styles.footerEstimateSubtext}>
-                Inclusive of GST and delivery
-              </Text>
-            </View>
-            <Text style={styles.footerEstimateValue}>
-              {formatCurrency(totals.grandTotal)}
-            </Text>
-          </View>
-          <PrimaryButton
-            icon="file-check-outline"
-            onPress={save}
-            title="Save Quotation"
-          />
-        </View>
-      }
-      keyboardAvoiding
-    >
+    <View style={qfStyles.root}>
+
+      {/* Standard AppHeader — same as every other screen */}
       <AppHeader
         navigation={navigation}
         showBack
@@ -941,558 +1311,100 @@ export const QuotationFormScreen = ({ navigation, route }) => {
         title="New Quotation"
       />
 
-      <View style={styles.formBody}>
-        {error ? (
-          <NoticeBanner
-            message={error}
-            style={styles.formNotice}
-            tone="danger"
-          />
-        ) : null}
-
-        <View style={[styles.quoteFormCard, styles.quoteInfoCard]}>
-          <Text style={[styles.quoteSectionLabel, styles.quoteSectionOrange]}>
-            QUOTATION INFORMATION
-          </Text>
-          <View style={styles.quoteInfoGrid}>
-            {[
-              ['Quotation Number', 'Auto-generated'],
-              ['Enquiry', 'Staff direct'],
-              ['Quotation Date', quotationDate],
-            ].map(([label, value]) => (
-              <View key={label} style={styles.quoteInfoTile}>
-                <Text style={styles.quoteInfoLabel}>{label}</Text>
-                <Text style={styles.quoteInfoValue}>{value}</Text>
-              </View>
-            ))}
-            <Pressable
-              accessibilityHint="Opens the date picker"
-              accessibilityLabel={`Valid until ${formatQuotationDate(validUntil)}`}
-              accessibilityRole="button"
-              onPress={openValidUntilPicker}
-              style={({ pressed }) => [
-                styles.quoteInfoTile,
-                styles.quoteDatePickerTile,
-                pressed && styles.cardPressed,
-              ]}
-            >
-              <Text style={styles.quoteInfoLabel}>Valid Until</Text>
-              <View style={styles.quoteDateValueRow}>
-                <Text style={styles.quoteInfoValue}>
-                  {formatQuotationDate(validUntil)}
-                </Text>
-                <Icon color={colors.primary} name="calendar-month" size={19} />
-              </View>
-              <Text style={styles.quoteDateHint}>Tap to select date</Text>
-            </Pressable>
-          </View>
-          {Platform.OS === 'ios' && showIosDatePicker ? (
-            <View style={styles.quoteIosDatePicker}>
-              <DateTimePicker
-                display="inline"
-                minimumDate={minimumValidUntil}
-                mode="date"
-                onChange={(event, date) => {
-                  if (event.type === 'set' && date) {
-                    selectValidUntil(date);
-                  }
-                }}
-                value={validUntil}
-              />
-              <PrimaryButton
-                onPress={() => setShowIosDatePicker(false)}
-                size="compact"
-                title="Done"
-              />
-            </View>
-          ) : null}
-          <View style={styles.quoteAutoNote}>
-            <Icon color={colors.primary} name="information-outline" size={16} />
-            <Text style={styles.quoteAutoNoteText}>
-              Quotation number is created automatically when you save.
-            </Text>
-          </View>
+      {/* Error banner */}
+      {error ? (
+        <View style={qfStyles.errorBanner}>
+          <Icon color="#B91C1C" name="alert-circle-outline" size={16} />
+          <Text style={qfStyles.errorText}>{error}</Text>
         </View>
+      ) : null}
 
-        <View style={[styles.quoteFormCard, styles.quoteCustomerCard]}>
-          <Text style={[styles.quoteSectionLabel, styles.quoteSectionBlue]}>
-            CUSTOMER DETAILS
-          </Text>
-          <Text style={styles.quoteSelectorLabel}>
-            Customer / Retailer <Text style={styles.requiredMark}>*</Text>
-          </Text>
-          <SearchInput
-            accessibilityLabel="Search and select customer"
-            autoCapitalize="words"
-            containerStyle={styles.quoteCustomerSearchContainer}
-            onChangeText={searchCustomers}
-            onFocus={() => setCustomerResultsVisible(true)}
-            placeholder="Search name, mobile, ID, city or GST"
-            value={customerSearch}
-          />
+      {/* FlatList form — everything including search results lives here */}
+      <FlatList
+        data={sections}
+        keyExtractor={item => item}
+        renderItem={renderItem}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="none"
+        contentContainerStyle={qfStyles.listContent}
+      />
 
-          {customerResultsVisible ? (
-            <View style={styles.quoteCustomerResults}>
-              {filteredCustomers.length ? (
-                filteredCustomers.map(customer => (
-                  <Pressable
-                    accessibilityLabel={`Select ${customer.name}`}
-                    accessibilityRole="button"
-                    key={customer.id}
-                    onPress={() => chooseCustomer(customer)}
-                    style={({ pressed }) => [
-                      styles.quoteCustomerResultRow,
-                      pressed && styles.cardPressed,
-                    ]}
-                  >
-                    <View style={styles.quoteCustomerResultAvatar}>
-                      <Text style={styles.quoteCustomerResultAvatarText}>
-                        {customer.name.charAt(0)}
-                      </Text>
-                    </View>
-                    <View style={styles.quoteCustomerResultCopy}>
-                      <Text
-                        numberOfLines={1}
-                        style={styles.quoteCustomerResultName}
-                      >
-                        {customer.name}
-                      </Text>
-                      <Text
-                        numberOfLines={1}
-                        style={styles.quoteCustomerResultMeta}
-                      >
-                        {customer.id} · {customer.mobile} · {customer.city}
-                      </Text>
-                    </View>
-                    <Icon color="#2563EB" name="chevron-right" size={20} />
-                  </Pressable>
-                ))
-              ) : (
-                <View style={styles.quoteCustomerNoResults}>
-                  <Icon color={colors.textMuted} name="account-search" size={20} />
-                  <Text style={styles.quoteCustomerNoResultsText}>
-                    No customers match “{customerSearch}”
-                  </Text>
-                </View>
-              )}
-            </View>
-          ) : null}
-
-          {!selectedCustomer && !customerResultsVisible ? (
-            <Text style={styles.quoteCustomerSearchHint}>
-              Search and select a customer to view full details.
-            </Text>
-          ) : null}
-
-          {selectedCustomer ? (
-            <View style={styles.quoteCustomerSummary}>
-              <View style={styles.quoteCustomerTop}>
-                <View style={styles.quoteCustomerAvatar}>
-                  <Text style={styles.quoteCustomerAvatarText}>
-                    {selectedCustomer.name.charAt(0)}
-                  </Text>
-                </View>
-                <View style={styles.quoteCustomerIdentity}>
-                  <Text style={styles.quoteCustomerName}>
-                    {selectedCustomer.name}
-                  </Text>
-                  <Text style={styles.quoteCustomerId}>{selectedCustomer.id}</Text>
-                </View>
-                <View style={styles.quoteCustomerType}>
-                  <Text style={styles.quoteCustomerTypeText}>
-                    {selectedCustomer.type}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.quoteAutoFilledRow}>
-                <Icon color={colors.success} name="check-circle" size={14} />
-                <Text style={styles.quoteAutoFilledText}>
-                  Details auto-filled from selected customer
-                </Text>
-              </View>
-
-              <View style={styles.quoteCustomerDetailGrid}>
-                {[
-                  ['Mobile', selectedCustomer.mobile, 'phone-outline'],
-                  ['Email', selectedCustomer.email, 'email-outline'],
-                  ['GSTIN', selectedCustomer.gst, 'identifier'],
-                  [
-                    'Location',
-                    `${selectedCustomer.city}, ${selectedCustomer.state}`,
-                    'map-marker-outline',
-                  ],
-                ].map(([label, value, icon]) => (
-                  <View key={label} style={styles.quoteCustomerDetailTile}>
-                    <Icon color="#2563EB" name={icon} size={16} />
-                    <View style={styles.quoteCustomerDetailCopy}>
-                      <Text style={styles.quoteCustomerDetailLabel}>{label}</Text>
-                      <Text
-                        numberOfLines={2}
-                        style={styles.quoteCustomerDetailValue}
-                      >
-                        {value || 'Not provided'}
-                      </Text>
-                    </View>
-                  </View>
-                ))}
-              </View>
-              <Text style={styles.quoteCustomerAddress}>
-                {[
-                  selectedCustomer.address,
-                  selectedCustomer.city,
-                  selectedCustomer.state,
-                  selectedCustomer.pincode,
-                ]
-                  .filter(Boolean)
-                  .join(', ')}
-              </Text>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={[styles.quoteFormCard, styles.quoteProductCard]}>
-          <Text style={[styles.quoteSectionLabel, styles.quoteSectionOrange]}>
-            PRODUCTS / ITEMS
-          </Text>
-          <Text style={styles.quoteSelectorLabel}>
-            Select Product <Text style={styles.requiredMark}>*</Text>
-          </Text>
-          <SearchInput
-            accessibilityLabel="Search and select product"
-            autoCapitalize="words"
-            containerStyle={styles.quoteCustomerSearchContainer}
-            onChangeText={searchProducts}
-            onFocus={() => setProductResultsVisible(true)}
-            placeholder="Search name, code, brand, category or size"
-            value={productSearch}
-          />
-
-          {productResultsVisible ? (
-            <View
-              style={[
-                styles.quoteCustomerResults,
-                styles.quoteProductResults,
-              ]}
-            >
-              {filteredProducts.length ? (
-                filteredProducts.map(product => (
-                  <Pressable
-                    accessibilityLabel={`Select ${product.name}`}
-                    accessibilityRole="button"
-                    key={product.id}
-                    onPress={() => chooseProduct(product)}
-                    style={({ pressed }) => [
-                      styles.quoteCustomerResultRow,
-                      pressed && styles.cardPressed,
-                    ]}
-                  >
-                    <View style={styles.quoteProductResultAvatar}>
-                      <Icon color={colors.primary} name="package-variant" size={18} />
-                    </View>
-                    <View style={styles.quoteCustomerResultCopy}>
-                      <Text
-                        numberOfLines={1}
-                        style={styles.quoteCustomerResultName}
-                      >
-                        {product.name}
-                      </Text>
-                      <Text
-                        numberOfLines={1}
-                        style={styles.quoteCustomerResultMeta}
-                      >
-                        {product.code} · {product.brand} · {product.category}
-                      </Text>
-                    </View>
-                    <View style={styles.quoteProductResultSummary}>
-                      <Text style={styles.quoteProductResultPrice}>
-                        {formatCurrency(product.rate)}
-                      </Text>
-                      <Text style={styles.quoteProductResultStock}>
-                        {product.stock} {product.unit}
-                      </Text>
-                    </View>
-                  </Pressable>
-                ))
-              ) : (
-                <View style={styles.quoteCustomerNoResults}>
-                  <Icon color={colors.textMuted} name="package-variant" size={20} />
-                  <Text style={styles.quoteCustomerNoResultsText}>
-                    No products match “{productSearch}”
-                  </Text>
-                </View>
-              )}
-            </View>
-          ) : null}
-
-          {!selectedProduct && !productResultsVisible ? (
-            <Text style={styles.quoteCustomerSearchHint}>
-              Search and select a product to view pricing and stock details.
-            </Text>
-          ) : null}
-
-          {selectedProduct ? (
-            <View style={styles.quoteItemCard}>
-              <View style={styles.quoteItemHeader}>
-                <View style={styles.quoteItemIndex}>
-                  <Text style={styles.quoteItemIndexText}>1</Text>
-                </View>
-                <View style={styles.quoteItemIdentity}>
-                  <Text style={styles.quoteItemName}>{selectedProduct.name}</Text>
-                  <Text style={styles.quoteItemCode}>{selectedProduct.code}</Text>
-                </View>
-                <View style={styles.quoteItemTotalWrap}>
-                  <Text style={styles.quoteItemTotalLabel}>ROW TOTAL</Text>
-                  <Text style={styles.quoteItemTotalValue}>
-                    {formatCurrency(totals.itemTotal)}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.quoteMetaGrid}>
-                {[
-                  ['Code', selectedProduct.code],
-                  ['Brand', selectedProduct.brand],
-                  ['Category', selectedProduct.category],
-                  ['Sub-Category', selectedProduct.subCategory],
-                  ['Size', selectedProduct.size],
-                  ['Finish', selectedProduct.finish],
-                  ['Tile Type', selectedProduct.tileType],
-                  ['Grade', selectedProduct.grade],
-                  ['Unit / GST', `${selectedProduct.unit} / ${form.gst || 0}%`],
-                  [
-                    'MRP',
-                    selectedProduct.mrp
-                      ? formatCurrency(selectedProduct.mrp)
-                      : null,
-                  ],
-                  [
-                    'Retail Rate',
-                    selectedProduct.retailPrice
-                      ? formatCurrency(selectedProduct.retailPrice)
-                      : null,
-                  ],
-                  [
-                    'Dealer Rate',
-                    selectedProduct.dealerPrice
-                      ? formatCurrency(selectedProduct.dealerPrice)
-                      : null,
-                  ],
-                  [
-                    'Purchase Rate',
-                    selectedProduct.purchasePrice
-                      ? formatCurrency(selectedProduct.purchasePrice)
-                      : null,
-                  ],
-                  [
-                    'Pcs/Box · Sqft/Box',
-                    [selectedProduct.pcsPerBox, selectedProduct.sqftPerBox]
-                      .filter(part => part !== undefined && part !== null)
-                      .join(' · '),
-                  ],
-                  ['HSN Code', selectedProduct.hsnCode],
-                  ['Location', selectedProduct.location],
-                ].map(([label, value]) => (
-                  <View key={label} style={styles.quoteMetaTile}>
-                    <Text style={styles.quoteMetaLabel}>{label}</Text>
-                    <Text numberOfLines={2} style={styles.quoteMetaValue}>
-                      {value || '—'}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-
-              <View style={styles.quoteInventoryBanner}>
-                <View style={styles.quoteInventoryIcon}>
-                  <Icon color={colors.success} name="warehouse" size={18} />
-                </View>
-                <View style={styles.quoteInventoryCopy}>
-                  <Text style={styles.quoteInventoryTitle}>
-                    {selectedProduct.stock} {selectedProduct.unit} available
-                  </Text>
-                  <Text style={styles.quoteInventoryText}>
-                    {selectedProduct.wholesaler} · {selectedProduct.location}
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.quotePricingLabel}>ITEM PRICING</Text>
-              <View style={styles.numericGrid}>
-                <View style={styles.numericField}>
-                  <TextField
-                    error={
-                      error && Number(form.quantity) <= 0
-                        ? 'Required'
-                        : undefined
-                    }
-                    keyboardType="number-pad"
-                    label={`Quantity (${selectedProduct.unit})`}
-                    onChangeText={value =>
-                      update('quantity', value.replace(/\D/g, ''))
-                    }
-                    placeholder="0"
-                    required
-                    value={form.quantity}
-                  />
-                </View>
-                <View style={styles.numericField}>
-                  <TextField
-                    error={
-                      error && Number(form.rate) <= 0
-                        ? 'Required'
-                        : undefined
-                    }
-                    keyboardType="number-pad"
-                    label="Rate / unit"
-                    onChangeText={value =>
-                      update('rate', value.replace(/\D/g, ''))
-                    }
-                    placeholder="0"
-                    prefix="₹"
-                    required
-                    value={form.rate}
-                  />
-                </View>
-                <View style={styles.numericField}>
-                  <TextField
-                    keyboardType="number-pad"
-                    label="Discount (₹)"
-                    onChangeText={value =>
-                      update('discount', value.replace(/\D/g, ''))
-                    }
-                    placeholder="0"
-                    prefix="₹"
-                    value={form.discount}
-                  />
-                </View>
-                <View style={styles.numericField}>
-                  <TextField
-                    keyboardType="number-pad"
-                    label="GST %"
-                    onChangeText={value =>
-                      update('gst', value.replace(/\D/g, ''))
-                    }
-                    placeholder="18"
-                    value={form.gst}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.quoteCalculationGrid}>
-                {[
-                  [
-                    'Qty',
-                    `${form.quantity || 0} ${selectedProduct.unit}`,
-                    '#2563EB',
-                  ],
-                  ['Amount', formatCurrency(totals.amount), colors.navy],
-                  ['Discount', formatCurrency(totals.discount), '#D97706'],
-                  ['GST Amt', formatCurrency(totals.gstAmount), '#7C3AED'],
-                  ['Total', formatCurrency(totals.itemTotal), colors.primary],
-                ].map(([label, value, color]) => (
-                  <View key={label} style={styles.quoteCalculationCell}>
-                    <Text style={styles.quoteCalculationLabel}>{label}</Text>
-                    <Text style={[styles.quoteCalculationValue, { color }]}>
-                      {value}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          ) : null}
-
-          <View style={styles.quoteTotalsCard}>
-            <TextField
-              keyboardType="number-pad"
-              label="Freight Charges"
-              onChangeText={value =>
-                update('deliveryCharge', value.replace(/\D/g, ''))
-              }
-              placeholder="0"
-              prefix="₹"
-              value={form.deliveryCharge}
-            />
-            <TextField
-              keyboardType="number-pad"
-              label="Other Charges"
-              onChangeText={value =>
-                update('otherCharge', value.replace(/\D/g, ''))
-              }
-              placeholder="0"
-              prefix="₹"
-              value={form.otherCharge}
-            />
-            <View style={styles.quoteTotalsRow}>
-              <Text style={styles.quoteTotalsLabel}>Taxable subtotal</Text>
-              <Text style={styles.quoteTotalsValue}>
-                {formatCurrency(totals.taxable)}
-              </Text>
-            </View>
-            <View style={styles.quoteTotalsRow}>
-              <Text style={styles.quoteTotalsLabel}>GST ({form.gst || 0}%)</Text>
-              <Text style={styles.quoteTotalsValue}>
-                {formatCurrency(totals.gstAmount)}
-              </Text>
-            </View>
-            <View style={styles.quoteTotalsRow}>
-              <Text style={styles.quoteTotalsLabel}>Subtotal + GST</Text>
-              <Text style={styles.quoteTotalsValue}>
-                {formatCurrency(totals.itemTotal)}
-              </Text>
-            </View>
-            <View style={styles.quoteTotalsRow}>
-              <Text style={styles.quoteTotalsLabel}>Freight Charges</Text>
-              <Text style={styles.quoteTotalsValue}>
-                {formatCurrency(Number(form.deliveryCharge || 0))}
-              </Text>
-            </View>
-            <View style={styles.quoteTotalsRow}>
-              <Text style={styles.quoteTotalsLabel}>Other Charges</Text>
-              <Text style={styles.quoteTotalsValue}>
-                {formatCurrency(Number(form.otherCharge || 0))}
-              </Text>
-            </View>
-            <View style={styles.quoteTotalsDivider} />
-            <View style={styles.quoteGrandTotalRow}>
-              <Text style={styles.quoteGrandTotalLabel}>GRAND TOTAL</Text>
-              <Text style={styles.quoteGrandTotalValue}>
-                {formatCurrency(totals.grandTotal)}
-              </Text>
-            </View>
+      {/* Fixed footer */}
+      <View style={qfStyles.fixedFooter}>
+        <View style={qfStyles.totalRow}>
+          <View>
+            <Text style={qfStyles.totalLabel}>GRAND TOTAL</Text>
+            <Text style={qfStyles.totalSub}>Incl. GST and delivery</Text>
           </View>
+          <Text style={qfStyles.totalValue}>{formatCurrency(totals.grandTotal)}</Text>
         </View>
-
-        <View style={[styles.quoteFormCard, styles.quoteRemarksCard]}>
-          <Text style={[styles.quoteSectionLabel, styles.quoteSectionMuted]}>
-            REMARKS & TERMS
-          </Text>
-          <TextField
-            autoCapitalize="sentences"
-            label="Remarks"
-            multiline
-            onChangeText={value => update('remarks', value)}
-            placeholder="Add internal or customer remarks"
-            value={form.remarks}
-          />
-          <TextField
-            autoCapitalize="sentences"
-            label="Terms & Conditions"
-            multiline
-            onChangeText={value => update('terms', value)}
-            placeholder="Add quotation terms and conditions"
-            value={form.terms}
-          />
-          <View style={styles.quoteTermsNote}>
-            <Icon color={colors.textMuted} name="shield-check-outline" size={16} />
-            <Text style={styles.quoteTermsNoteText}>
-              Price and availability are subject to final Admin approval.
-            </Text>
-          </View>
-        </View>
+        <Pressable
+          onPress={save}
+          disabled={saving}
+          style={({ pressed }) => [qfStyles.saveBtn, (pressed || saving) && { opacity: 0.8 }]}
+          accessibilityRole="button"
+          accessibilityLabel="Save quotation">
+          <Icon color={colors.white} name="file-check-outline" size={18} />
+          <Text style={qfStyles.saveBtnText}>{saving ? 'Saving…' : 'Save Quotation'}</Text>
+        </Pressable>
       </View>
-    </Screen>
+    </View>
   );
 };
+
+// Styles for QuotationFormScreen
+const qfStyles = StyleSheet.create({
+  root:           { backgroundColor: colors.background, flex: 1 },
+  errorBanner:    { alignItems: 'center', backgroundColor: '#FEF2F2', borderBottomColor: '#FCA5A5', borderBottomWidth: 1, flexDirection: 'row', gap: spacing.sm, padding: spacing.md },
+  errorText:      { color: '#B91C1C', flex: 1, fontSize: 13 },
+  listContent:    { padding: spacing.lg, paddingTop: spacing.md },
+  sectionLabel:   { alignItems: 'center', flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.xs, marginTop: spacing.md },
+  sectionLabelText: { color: colors.textMuted, flex: 1, fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
+  selectedBadge:  { backgroundColor: '#DCFCE7', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
+  selectedBadgeText: { color: '#166534', fontSize: 11, fontWeight: '700' },
+  requiredBadge:  { color: colors.primary, fontSize: 11, fontWeight: '600' },
+  searchBox:      { alignItems: 'center', backgroundColor: colors.surface, borderColor: colors.border, borderRadius: radius.md, borderWidth: 1.5, flexDirection: 'row', marginBottom: 2, paddingHorizontal: spacing.md, paddingVertical: 10 },
+  searchBoxIcon:  { marginHorizontal: 4 },
+  searchBoxInput: { color: colors.text, flex: 1, fontSize: 15, paddingVertical: 2 },
+  resultRow:      { alignItems: 'center', backgroundColor: colors.surface, borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', gap: spacing.md, paddingHorizontal: spacing.md, paddingVertical: 10 },
+  resultAvatar:   { alignItems: 'center', backgroundColor: '#EAF3FF', borderRadius: 18, height: 36, justifyContent: 'center', width: 36 },
+  resultAvatarText: { color: '#2563EB', fontSize: 15, fontWeight: '700' },
+  resultBody:     { flex: 1 },
+  resultTitle:    { color: colors.text, fontSize: 14, fontWeight: '600' },
+  resultMeta:     { color: colors.textMuted, fontSize: 11, marginTop: 1 },
+  noResults:      { backgroundColor: colors.surface, padding: spacing.lg, alignItems: 'center' },
+  noResultsText:  { color: colors.textMuted, fontSize: 13 },
+  selectedCard:   { backgroundColor: colors.surface, borderColor: colors.success, borderRadius: radius.md, borderWidth: 1.5, marginBottom: spacing.md, overflow: 'hidden' },
+  selectedCardTop: { alignItems: 'center', flexDirection: 'row', gap: spacing.md, padding: spacing.md },
+  selectedCardName: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  changeBtn:      { backgroundColor: '#EFF6FF', borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: 6 },
+  changeBtnText:  { color: colors.primary, fontSize: 12, fontWeight: '700' },
+  // Product owner badge
+  ownerBadge:     { alignItems: 'center', backgroundColor: '#F5F3FF', borderTopColor: '#E9D5FF', borderTopWidth: 1, flexDirection: 'row', gap: 6, paddingHorizontal: spacing.md, paddingVertical: 6 },
+  ownerBadgeText: { color: '#6D28D9', fontSize: 11, fontWeight: '600' },
+  // Product details grid
+  productDetailGrid:  { borderTopColor: colors.border, borderTopWidth: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 0, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
+  productDetailItem:  { paddingHorizontal: 4, paddingVertical: 4, width: '50%' },
+  productDetailLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '700', letterSpacing: 0.3, textTransform: 'uppercase' },
+  productDetailValue: { color: colors.text, fontSize: 13, fontWeight: '600', marginTop: 1 },
+  // Auto-filled rate/gst row
+  pricingCard:    { backgroundColor: colors.surface, borderColor: colors.border, borderRadius: radius.md, borderWidth: 1, marginBottom: spacing.md, padding: spacing.md },
+  autoFilledRow:  { alignItems: 'center', backgroundColor: '#F8F9FA', borderRadius: radius.sm, flexDirection: 'row', marginTop: spacing.sm, overflow: 'hidden' },
+  autoFilledItem: { alignItems: 'center', flex: 1, paddingVertical: spacing.sm },
+  autoFilledDivider: { backgroundColor: colors.border, height: 36, width: 1 },
+  autoFilledLabel:{ color: colors.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 0.3, textAlign: 'center' },
+  autoFilledValue:{ color: colors.primary, fontSize: 13, fontWeight: '900', marginTop: 2 },
+  autoFilledHint: { color: colors.textMuted, fontSize: 9, marginTop: 1 },
+  // Footer
+  fixedFooter:    { backgroundColor: colors.surface, borderTopColor: colors.divider, borderTopWidth: 1, elevation: 12, padding: spacing.lg, paddingBottom: spacing.lg + 8 },
+  totalRow:       { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: spacing.md },
+  totalLabel:     { color: colors.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
+  totalSub:       { color: colors.textMuted, fontSize: 11, marginTop: 1 },
+  totalValue:     { color: colors.primary, fontSize: 22, fontWeight: '900' },
+  saveBtn:        { alignItems: 'center', backgroundColor: colors.primary, borderRadius: radius.md, flexDirection: 'row', gap: spacing.sm, justifyContent: 'center', paddingVertical: spacing.md },
+  saveBtnText:    { color: colors.white, fontSize: 15, fontWeight: '700' },
+});
+
 
 export const QuotationDetailScreen = ({ navigation, route }) => {
   const { orders, quotations } = useApp();
@@ -2035,7 +1947,10 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: 1,
     marginTop: spacing.xs,
-    overflow: 'hidden',
+    maxHeight: 280,
+    overflow: 'scroll',
+    zIndex: 999,
+    elevation: 8,
   },
   quoteCustomerResultRow: {
     alignItems: 'center',
@@ -2092,6 +2007,10 @@ const styles = StyleSheet.create({
   },
   quoteProductResults: {
     borderColor: '#FFD6BC',
+    maxHeight: 320,
+    overflow: 'scroll',
+    zIndex: 999,
+    elevation: 8,
   },
   quoteProductResultAvatar: {
     alignItems: 'center',
@@ -2883,3 +2802,6 @@ const styles = StyleSheet.create({
   },
   linkedNotice: { marginHorizontal: spacing.lg, marginTop: spacing.lg },
 });
+
+
+

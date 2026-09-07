@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import { useApp } from '../AppContext';
+import { useApp, useRefresh } from '../AppContext';
 import {
   AppHeader,
   ChoiceChips,
@@ -35,23 +35,34 @@ import { colors, formatCurrency, radius, shadow, spacing } from '../theme';
 // ─────────────────────────────────────────────────────────────────
 export const CollectionsScreen = ({ navigation }) => {
   const { collections, staff } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
   const [filter, setFilter] = useState('PENDING');
 
+  // Debug logging
+  console.log('CollectionsScreen - Staff ID:', staff?.id);
+  console.log('CollectionsScreen - Total collections:', collections.length);
+  
   const staffCollections = collections.filter(
     item => item.staffId === staff.id || item.staffId === null,
   );
+  
+  console.log('CollectionsScreen - Staff collections:', staffCollections.length);
+  
   const visible = staffCollections.filter(item => {
     if (filter === 'ALL') return true;
     if (filter === 'VERIFIED') return item.status === 'ACCOUNT_VERIFIED';
     return item.status !== 'ACCOUNT_VERIFIED';
   });
+  
+  console.log('CollectionsScreen - Visible (filtered):', visible.length, 'Filter:', filter);
+  
   const pendingAmount = staffCollections
     .filter(item => item.status !== 'ACCOUNT_VERIFIED')
     .reduce((sum, item) => sum + item.amount, 0);
   const totalCollected = staffCollections.reduce((s, i) => s + i.amount, 0);
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack

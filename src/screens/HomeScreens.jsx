@@ -1,7 +1,7 @@
 import React from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import { useApp } from '../AppContext';
+import { useApp, useRefresh } from '../AppContext';
 import {
   ActionTile,
   AppHeader,
@@ -55,20 +55,49 @@ export const DashboardScreen = ({ navigation }) => {
     staff,
     unreadCount,
   } = useApp();
-  const pendingQuotations = quotations.filter(item =>
-    ['PENDING', 'RESPONDED', 'NEGOTIATION'].includes(item.status),
-  ).length;
-  const activeOrders = orders.filter(
-    order => !['DELIVERED', 'CANCELLED'].includes(order.status),
-  ).length;
-  const holdOrders = orders.filter(order => order.status === 'HOLD').length;
+  const { refreshing, onRefresh } = useRefresh();
+  
+  // Debug logging for dashboard
+  console.log('DashboardScreen - Data loaded:', {
+    customers: customers.length,
+    quotations: quotations.length,
+    orders: orders.length,
+    invoices: invoices.length,
+    collections: collections.length,
+  });
+  
+  // Broaden status matching to catch more quotations
+  const pendingQuotations = quotations.filter(item => {
+    const status = item.status?.toUpperCase() || '';
+    return ['PENDING', 'RESPONDED', 'NEGOTIATION', 'DRAFT', 'SENT'].includes(status);
+  }).length;
+  
+  const activeOrders = orders.filter(order => {
+    const status = order.status?.toUpperCase() || '';
+    return !['DELIVERED', 'CANCELLED'].includes(status);
+  }).length;
+  
+  const holdOrders = orders.filter(order => {
+    const status = order.status?.toUpperCase() || '';
+    return status === 'HOLD';
+  }).length;
+  
   const pendingInvoices = invoices.filter(invoice => invoice.balance > 0).length;
+  
   const pendingCollections = collections.filter(
     collection => collection.status !== 'ACCOUNT_VERIFIED',
   ).length;
 
+  console.log('DashboardScreen - Metrics:', {
+    pendingQuotations,
+    activeOrders,
+    holdOrders,
+    pendingInvoices,
+    pendingCollections,
+  });
+
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         avatar={(staff.name || 'S').charAt(0)}
         navigation={navigation}

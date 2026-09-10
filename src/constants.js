@@ -1,19 +1,14 @@
-// ── App-wide constants ─────────────────────────────────────────
-// Non-seed values that are safe to ship in production. No mock/fake records.
+/**
+ * App-wide constants shared across screens and AppContext.
+ */
 
+/**
+ * OTP challenge purpose identifiers.
+ * Used to distinguish what action an in-progress OTP verification is for.
+ */
 export const OTP_PURPOSES = {
-  LOGIN:               'LOGIN_OTP',
-  PAYMENT_COLLECTION:  'PAYMENT_COLLECTION_OTP',
-  DELIVERY:            'DELIVERY_OTP',
+  /** OTP required to confirm delivery of a dispatch */
+  DELIVERY: 'Delivery Confirmation',
+  /** OTP required to verify a payment collection */
+  PAYMENT_COLLECTION: 'Payment Collection',
 };
-
-export const ORDER_STATUSES = [
-  'NEW', 'ACCEPTED', 'HOLD', 'PROCESSING',
-  'READY_TO_DISPATCH', 'PARTIALLY_DISPATCHED', 'FULLY_DISPATCHED',
-  'OUT_FOR_DELIVERY', 'PARTIALLY_DELIVERED', 'DELIVERED', 'CANCELLED',
-];
-
-export const COLLECTION_STATUSES = [
-  'COLLECTED', 'HANDOVER_PENDING', 'ACCOUNT_VERIFICATION',
-  'ACCOUNT_VERIFIED', 'VERIFICATION_FAILED',
-];

@@ -79,6 +79,14 @@ export const invoiceApi = {
   summary:       ()            => request('/staff/invoices/summary', { auth: true }),
   recordPayment: (id, body)    =>
     request(`/staff/invoices/${id}/payment`, { method: 'POST', auth: true, body }),
+  // Called by the Staff App when the admin initiates verification and the
+  // staff member needs to read their OTP on the CollectionOtpScreen.
+  // The OTP was already sent to their mobile by the admin-side action —
+  // this just verifies the code the staff reads out.
+  verifyCollection: (invoiceId, paymentId, otp) =>
+    request(`/staff/invoices/${invoiceId}/payment/${paymentId}/verify`, {
+      method: 'POST', auth: true, body: { otp },
+    }),
 };
 
 // ── Dispatches (read-only for staff) ─────────────────────────

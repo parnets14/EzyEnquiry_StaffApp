@@ -160,6 +160,9 @@ export const statusColors = status => {
     normalized.includes('HOLD') ||
     normalized.includes('PENDING') ||
     normalized.includes('NEGOTIATION') ||
+    normalized.includes('PACKING') ||
+    normalized.includes('PICKING') ||
+    normalized.includes('SORTING') ||
     normalized.includes('READY') ||
     normalized.includes('HANDOVER') ||
     normalized.includes('ACCOUNT_VERIFICATION') ||

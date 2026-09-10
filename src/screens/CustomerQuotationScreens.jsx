@@ -1,7 +1,8 @@
-﻿import React, { useMemo, useState, useCallback } from 'react';
+﻿import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import {
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -19,6 +20,8 @@ import DateTimePicker, {
 } from '@react-native-community/datetimepicker';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useApp, useRefresh } from '../AppContext';
+import { orderApi, quotationApi, invoiceApi } from '../api';
+import { API_BASE_URL } from '../config';
 import {
   AppHeader,
   ChoiceChips,
@@ -136,7 +139,12 @@ export const CustomersScreen = ({ navigation }) => {
                     {customer.name}
                   </Text>
                   <Text style={styles.customerMeta}>
-                    {customer.id} · {customer.type}
+                    {customer.type}
+                    {customer.gst && customer.gst !== 'Not provided'
+                      ? ` · GST: ${customer.gst}`
+                      : customer.email
+                      ? ` · ${customer.email}`
+                      : ''}
                   </Text>
                 </View>
                 <Icon color={colors.textMuted} name="chevron-right" size={22} />
@@ -205,14 +213,17 @@ export const CustomerFormScreen = ({ navigation }) => {
     state: '',
     pincode: '',
   });
-  const [error, setError] = useState('');
+  const [error, setSavingError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const setError = msg => setSavingError(msg);
 
   const update = (field, value) => {
     setForm(current => ({ ...current, [field]: value }));
-    setError('');
+    setSavingError('');
   };
 
-  const save = () => {
+  const save = async () => {
     if (
       !form.name.trim() ||
       form.mobile.length !== 10 ||
@@ -227,15 +238,27 @@ export const CustomerFormScreen = ({ navigation }) => {
       return;
     }
 
-    const customer = addCustomer(form);
+    setSaving(true);
+    const result = await addCustomer(form);
+    setSaving(false);
+
+    if (!result || result.success === false) {
+      setError(result?.message || 'Failed to create customer. Please try again.');
+      return;
+    }
+
     Alert.alert(
       'Customer created',
-      `${customer.name} is now visible to Staff and Admin.`,
+      `${result.name} has been added and is now visible to Staff and Admin.`,
       [
         {
           text: 'View customer',
           onPress: () =>
-            navigation.replace('CustomerDetail', { id: customer.id }),
+            navigation.replace('CustomerDetail', { id: result.id }),
+        },
+        {
+          text: 'Back to list',
+          onPress: () => navigation.goBack(),
         },
       ],
     );
@@ -246,8 +269,9 @@ export const CustomerFormScreen = ({ navigation }) => {
       footer={
         <PrimaryButton
           icon="content-save-outline"
+          loading={saving}
           onPress={save}
-          title="Save customer"
+          title={saving ? 'Saving…' : 'Save customer'}
         />
       }
       keyboardAvoiding
@@ -385,40 +409,107 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
   const { customers, invoices, orders, payments, quotations } = useApp();
   const customer = customers.find(item => item.id === route.params?.id);
 
+  // Locally-filtered fallback (instant render from already-loaded context data).
+  const matchCustomer = item =>
+    customer &&
+    (String(item.customerId) === String(customer.id) ||
+      String(item.customerId) === String(customer._id));
+
+  const localOrders   = orders.filter(matchCustomer);
+  const localQuotes   = quotations.filter(matchCustomer);
+  const localInvoices = invoices.filter(matchCustomer);
+  const localPayments = payments.filter(matchCustomer);
+
+  // Full history fetched from the backend by customer_id (includes OLD records
+  // and records created by the retailer/admin — not just this staff's own).
+  const [fullOrders, setFullOrders]   = useState(null);
+  const [fullQuotes, setFullQuotes]   = useState(null);
+  const [fullInvoices, setFullInvoices] = useState(null);
+  const [fullPayments, setFullPayments] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const customerObjId = customer?._id || customer?.id;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!customerObjId) return;
+
+    (async () => {
+      setLoadingHistory(true);
+      try {
+        const [oRes, qRes, iRes] = await Promise.all([
+          orderApi.list({ customer_id: customerObjId, limit: 200 }),
+          quotationApi.list({ customer_id: customerObjId, limit: 200 }),
+          invoiceApi.list({ customer_id: customerObjId, limit: 200 }),
+        ]);
+        if (cancelled) return;
+
+        if (oRes?.success) {
+          const raw = oRes.data?.orders || oRes.data || [];
+          setFullOrders(raw.map(o => ({
+            id:            o.order_code || String(o._id),
+            productName:   o.product_name || (o.items?.[0]?.product_name) || 'Order',
+            total:         Number(o.grand_total ?? o.total ?? 0),
+            status:        o.status || '',
+            createdByName: o.created_by_name || '',
+            createdByType: o.created_by_type || '',
+          })));
+        }
+        if (qRes?.success) {
+          const raw = qRes.data?.quotations || qRes.data || [];
+          setFullQuotes(raw.map(q => {
+            const it = q.items?.[0] || {};
+            return {
+              id:            q.quotation_no || String(q._id),
+              productName:   it.product_name || 'Quotation',
+              quantity:     (q.items || []).reduce((s, x) => s + (Number(x.qty) || 0), 0),
+              unit:          it.unit || 'pcs',
+              total:         Number(q.grand_total ?? q.total ?? 0),
+              status:        q.status || '',
+              createdByName: q.created_by_name || '',
+              createdByType: q.created_by_type || '',
+            };
+          }));
+        }
+        if (iRes?.success) {
+          const raw = iRes.data?.invoices || iRes.data || [];
+          const pays = [];
+          raw.forEach(inv => {
+            (inv.payment_history || []).forEach(ph => {
+              pays.push({
+                id:        String(ph._id),
+                invoiceId: inv.invoice_no || String(inv._id),
+                _invoiceId: String(inv._id),
+                amount:    Number(ph.amount) || 0,
+                mode:      ph.payment_mode || 'Cash',
+                status:    ph.verification_status || 'Pending',
+                date:      ph.payment_date,
+              });
+            });
+          });
+          pays.sort((a, b) => new Date(b.date) - new Date(a.date));
+          setFullInvoices(raw);
+          setFullPayments(pays);
+        }
+      } catch {
+        /* keep local fallback on error */
+      } finally {
+        if (!cancelled) setLoadingHistory(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [customerObjId]);
+
   if (!customer) {
     return <MissingRecord navigation={navigation} title="Customer not found" />;
   }
 
-  // Filter related data - ensure ID matching works correctly
-  const customerOrders = orders.filter(item => {
-    // Match both string IDs and potential ObjectId comparisons
-    return String(item.customerId) === String(customer.id) || 
-           String(item.customerId) === String(customer._id);
-  });
-  
-  const customerQuotes = quotations.filter(item => {
-    return String(item.customerId) === String(customer.id) || 
-           String(item.customerId) === String(customer._id);
-  });
-  
-  const customerInvoices = invoices.filter(item => {
-    return String(item.customerId) === String(customer.id) || 
-           String(item.customerId) === String(customer._id);
-  });
-  
-  const customerPayments = payments.filter(item => {
-    return String(item.customerId) === String(customer.id) || 
-           String(item.customerId) === String(customer._id);
-  });
-
-  // Debug logging
-  console.log('CustomerDetailScreen - Customer ID:', customer.id, 'ObjectId:', customer._id);
-  console.log('CustomerDetailScreen - Total quotations:', quotations.length);
-  console.log('CustomerDetailScreen - Filtered quotations:', customerQuotes.length);
-  console.log('CustomerDetailScreen - Total orders:', orders.length);
-  console.log('CustomerDetailScreen - Filtered orders:', customerOrders.length);
-  console.log('CustomerDetailScreen - Total invoices:', invoices.length);
-  console.log('CustomerDetailScreen - Filtered invoices:', customerInvoices.length);
+  // Prefer the full fetched history; fall back to locally-filtered data.
+  const customerOrders   = fullOrders   ?? localOrders;
+  const customerQuotes   = fullQuotes   ?? localQuotes;
+  const customerInvoices = fullInvoices ?? localInvoices;
+  const customerPayments = fullPayments ?? localPayments;
 
   return (
     <Screen>
@@ -426,7 +517,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
         navigation={navigation}
         showBack
         showNotifications={false}
-        subtitle={customer.id}
+        subtitle={customer.mobile ? `+91 ${customer.mobile}` : customer.city || ''}
         title="Customer details"
       />
 
@@ -526,6 +617,8 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
               quotation.productName
             }, ${formatCurrency(quotation.total)}`}
             amount={formatCurrency(quotation.total)}
+            createdByName={quotation.createdByName}
+            createdByType={quotation.createdByType}
             id={quotation.id}
             key={quotation.id}
             name={`${quotation.productName} · ${quotation.quantity} ${quotation.unit}`}
@@ -544,7 +637,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
         />
       )}
 
-      <SectionHeader title="Recent orders" />
+      <SectionHeader title={`Orders (${customerOrders.length})`} />
       {customerOrders.length ? (
         customerOrders.map(order => (
           <ActivityCard
@@ -552,6 +645,8 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
               order.productName
             }, ${formatCurrency(order.total)}`}
             amount={formatCurrency(order.total)}
+            createdByName={order.createdByName}
+            createdByType={order.createdByType}
             id={order.id}
             key={order.id}
             name={order.productName}
@@ -763,6 +858,15 @@ export const QuotationsScreen = ({ navigation }) => {
 // Inline search for customer + product using FlatList as the form container
 // so keyboard never hides the results.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Resolve a product's first image to a full URL
+const SERVER_ROOT = API_BASE_URL.replace('/api', '');
+const productThumb = (p) => {
+  const raw = Array.isArray(p.imageUrls) ? p.imageUrls[0] : null;
+  if (!raw) return null;
+  if (raw.startsWith('http')) return raw;
+  return `${SERVER_ROOT}${raw}`;
+};
 export const QuotationFormScreen = ({ navigation, route }) => {
   const { createQuotation, allCustomers, products } = useApp();
   const routeCustomer = allCustomers.find(c => c.id === route.params?.customerId);
@@ -777,6 +881,7 @@ export const QuotationFormScreen = ({ navigation, route }) => {
     gst:            '18', // auto-set from product.gst_percent, not user-editable
     deliveryCharge: '0',
     otherCharge:    '0',
+    deliveryAddress:'',
     remarks:        '',
     terms:          'Prices are subject to change. GST extra as applicable.',
   });
@@ -846,6 +951,10 @@ export const QuotationFormScreen = ({ navigation, route }) => {
   const save = async () => {
     if (!selectedCustomer || !selectedProduct || Number(form.quantity) <= 0 || Number(form.rate) <= 0) {
       setError('Select a customer and product, then enter valid quantity and rate.');
+      return;
+    }
+    if (!form.deliveryAddress.trim()) {
+      setError('Delivery address is required.');
       return;
     }
     setSaving(true);
@@ -1063,11 +1172,11 @@ export const QuotationFormScreen = ({ navigation, route }) => {
     if (key.startsWith('prod_') && key !== 'prod_empty') {
       const p = products.find(x => x.id === key.replace('prod_',''));
       if (!p) return null;
+      const imgUri = productThumb(p);
       return (
         <Pressable
           key={key}
           onPress={() => {
-            // rate = dealer_price (or fallback to best available price)
             const autoRate = p.dealer_price || p.retail_price || p.selling_price || p.mrp || 0;
             setForm(cur => ({
               ...cur,
@@ -1080,9 +1189,18 @@ export const QuotationFormScreen = ({ navigation, route }) => {
             setError('');
           }}
           style={({ pressed }) => [qfStyles.resultRow, pressed && { backgroundColor: '#FFF5EE' }]}>
-          <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
-            <Icon color={colors.primary} name="package-variant" size={16} />
-          </View>
+          {/* Thumbnail */}
+          {imgUri ? (
+            <Image
+              source={{ uri: imgUri }}
+              style={qfStyles.prodThumb}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
+              <Icon color={colors.primary} name="package-variant" size={16} />
+            </View>
+          )}
           <View style={qfStyles.resultBody}>
             <Text style={qfStyles.resultTitle} numberOfLines={1}>{p.name}</Text>
             <Text style={qfStyles.resultMeta} numberOfLines={1}>
@@ -1111,13 +1229,23 @@ export const QuotationFormScreen = ({ navigation, route }) => {
     );
 
     // ── Selected product detail ──
-    if (key === 'product_detail' && selectedProduct) return (
+    if (key === 'product_detail' && selectedProduct) {
+      const selImgUri = productThumb(selectedProduct);
+      return (
       <View style={qfStyles.selectedCard}>
-        {/* Top: name + change */}
+        {/* Top: image + name + change */}
         <View style={qfStyles.selectedCardTop}>
-          <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
-            <Icon color={colors.primary} name="package-variant" size={18} />
-          </View>
+          {selImgUri ? (
+            <Image
+              source={{ uri: selImgUri }}
+              style={qfStyles.prodThumbSelected}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={[qfStyles.resultAvatar, { backgroundColor: '#FFF0E5' }]}>
+              <Icon color={colors.primary} name="package-variant" size={18} />
+            </View>
+          )}
           <View style={{ flex: 1 }}>
             <Text style={qfStyles.selectedCardName}>{selectedProduct.name}</Text>
             <Text style={qfStyles.resultMeta}>{selectedProduct.code}{selectedProduct.brand ? ` · ${selectedProduct.brand}` : ''}</Text>
@@ -1175,6 +1303,7 @@ export const QuotationFormScreen = ({ navigation, route }) => {
         </View>
       </View>
     );
+    }
 
   // ── Pricing fields — only Qty and Discount are editable.
   // Rate and GST are auto-filled from product and locked.
@@ -1279,6 +1408,26 @@ export const QuotationFormScreen = ({ navigation, route }) => {
     // ── Remarks ──
     if (key === 'remarks') return (
       <View style={[styles.quoteFormCard, styles.quoteRemarksCard]}>
+        {/* ── Delivery Address (required) ── */}
+        <Text style={[styles.quoteSectionLabel, styles.quoteSectionMuted]}>DELIVERY</Text>
+        <TextField
+          autoCapitalize="sentences"
+          label="Delivery Address *"
+          multiline
+          onChangeText={v => update('deliveryAddress', v)}
+          placeholder="Full delivery address — street, city, pincode"
+          value={form.deliveryAddress}
+          numberOfLines={3}
+        />
+        {!form.deliveryAddress.trim() ? (
+          <View style={styles.quoteFieldHint}>
+            <Icon color={colors.danger} name="map-marker-alert-outline" size={14} />
+            <Text style={styles.quoteFieldHintText}>Delivery address is required</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.quoteSectionSpacer} />
+
         <Text style={[styles.quoteSectionLabel, styles.quoteSectionMuted]}>REMARKS & TERMS</Text>
         <TextField autoCapitalize="sentences" label="Remarks" multiline
           onChangeText={v => update('remarks', v)}
@@ -1369,6 +1518,8 @@ const qfStyles = StyleSheet.create({
   resultRow:      { alignItems: 'center', backgroundColor: colors.surface, borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', gap: spacing.md, paddingHorizontal: spacing.md, paddingVertical: 10 },
   resultAvatar:   { alignItems: 'center', backgroundColor: '#EAF3FF', borderRadius: 18, height: 36, justifyContent: 'center', width: 36 },
   resultAvatarText: { color: '#2563EB', fontSize: 15, fontWeight: '700' },
+  prodThumb:         { width: 48, height: 48, borderRadius: 8, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: '#F8FAFC' },
+  prodThumbSelected: { width: 52, height: 52, borderRadius: 10, borderWidth: 1, borderColor: '#FED7AA', backgroundColor: '#FFF7ED' },
   resultBody:     { flex: 1 },
   resultTitle:    { color: colors.text, fontSize: 14, fontWeight: '600' },
   resultMeta:     { color: colors.textMuted, fontSize: 11, marginTop: 1 },
@@ -1550,6 +1701,13 @@ export const QuotationDetailScreen = ({ navigation, route }) => {
 
       <SurfaceCard style={styles.detailCard}>
         <CardHeading icon="link-variant" title="Related records" />
+        {quotation.deliveryAddress ? (
+          <InfoRow
+            icon="map-marker-outline"
+            label="Delivery address"
+            value={quotation.deliveryAddress}
+          />
+        ) : null}
         <InfoRow
           label="Customer"
           value={`${quotation.customerName} · ${quotation.customerId}`}
@@ -1616,29 +1774,55 @@ const ActivityCard = ({
   name,
   onPress,
   status,
-}) => (
-  <Pressable
-    accessibilityHint="Opens record details"
-    accessibilityLabel={accessibilityLabel}
-    accessibilityRole="button"
-    onPress={onPress}
-    style={({ pressed }) => [
-      styles.activityCard,
-      pressed && styles.cardPressed,
-    ]}
-  >
-    <View style={styles.activityContent}>
-      <Text style={styles.activityId}>{id}</Text>
-      <Text numberOfLines={2} style={styles.activityName}>
-        {name}
-      </Text>
-    </View>
-    <View style={styles.activityRight}>
-      <StatusPill status={status} />
-      <Text style={styles.activityAmount}>{amount}</Text>
-    </View>
-  </Pressable>
-);
+  createdByName,
+  createdByType,
+}) => {
+  const typeUpper = String(createdByType || '').toUpperCase();
+  const isRetailer = typeUpper.includes('RETAILER');
+  const roleLabel = typeUpper.includes('RETAILER') ? 'Retailer'
+    : typeUpper.includes('WHOLESALER') ? 'Wholesaler'
+    : typeUpper.includes('STAFF') ? 'Staff'
+    : typeUpper.includes('ADMIN') ? 'Admin'
+    : '';
+  const creatorLabel = createdByName
+    ? (roleLabel ? `${createdByName} · ${roleLabel}` : createdByName)
+    : roleLabel;
+  return (
+    <Pressable
+      accessibilityHint="Opens record details"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.activityCard,
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View style={styles.activityContent}>
+        <Text style={styles.activityId}>{id}</Text>
+        <Text numberOfLines={2} style={styles.activityName}>
+          {name}
+        </Text>
+        {creatorLabel ? (
+          <View style={styles.activityCreatorRow}>
+            <Icon
+              color={isRetailer ? colors.primary : colors.navy}
+              name={isRetailer ? 'storefront-outline' : 'account-tie-outline'}
+              size={12}
+            />
+            <Text numberOfLines={1} style={styles.activityCreator}>
+              Created by {creatorLabel}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.activityRight}>
+        <StatusPill status={status} />
+        <Text style={styles.activityAmount}>{amount}</Text>
+      </View>
+    </Pressable>
+  );
+};
 
 const MissingRecord = ({ navigation, title }) => (
   <Screen>
@@ -2367,6 +2551,21 @@ const styles = StyleSheet.create({
     lineHeight: typography.lineHeights.caption,
     marginLeft: spacing.xs,
   },
+  quoteFieldHint: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: 2,
+    marginBottom: spacing.xs,
+  },
+  quoteFieldHintText: {
+    color: colors.danger,
+    flex: 1,
+    fontSize: typography.sizes.caption,
+  },
+  quoteSectionSpacer: {
+    height: spacing.lg,
+  },
   quoteSavedTermsDivider: {
     backgroundColor: colors.border,
     height: 1,
@@ -2511,6 +2710,18 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.bold,
     lineHeight: typography.lineHeights.label,
     marginTop: spacing.xs,
+  },
+  activityCreatorRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+    marginTop: spacing.xs,
+  },
+  activityCreator: {
+    color: colors.textMuted,
+    flexShrink: 1,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.medium,
   },
   activityRight: { alignItems: 'flex-end', flexShrink: 0 },
   activityAmount: {

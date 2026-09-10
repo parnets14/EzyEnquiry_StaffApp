@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useApp, useRefresh } from '../AppContext';
 import { invoiceApi } from '../api';
-import { mapApiInvoice } from '../AppContext';
+import { mapApiInvoice, ORDER_STATUS_MAP } from '../AppContext';
 import {
   AppHeader,
   ChoiceChips,
@@ -293,53 +293,90 @@ export const OrdersScreen = ({ navigation }) => {
 };
 
 const ORDER_STEPS = [
-  { key: 'CONFIRMED', label: 'Confirmed', icon: 'file-check-outline' },
-  { key: 'PACKING', label: 'Packing', icon: 'package-variant-closed' },
-  { key: 'READY_TO_DISPATCH', label: 'Ready', icon: 'clipboard-check-outline' },
-  { key: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'truck-fast-outline' },
-  { key: 'DELIVERED', label: 'Delivered', icon: 'check-circle-outline' },
+  { key: 'NEW',              label: 'New',              icon: 'clipboard-text-outline'  },
+  { key: 'ACCEPTED',         label: 'Accepted',         icon: 'check-decagram-outline'  },
+  { key: 'PACKING',          label: 'Packing',          icon: 'package-variant-closed'  },
+  { key: 'DISPATCHED',       label: 'Dispatched',       icon: 'truck-check-outline'     },
+  { key: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'truck-fast-outline'      },
+  { key: 'DELIVERED',        label: 'Delivered',        icon: 'check-circle-outline'    },
 ];
 
 export const OrderDetailScreen = ({ navigation, route }) => {
-  const { dispatches, invoices, orders } = useApp();
-  const order = orders.find(item => item.id === route.params?.id);
+  const { dispatches, fetchOrderDetail, invoices, orders } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
+
+  // Base order from the list (instant render, no flicker)
+  const baseOrder = orders.find(item => item.id === route.params?.id);
+
+  // Enriched order loaded from the detail endpoint (dispatches + invoices + payment summary)
+  const [detail, setDetail]     = useState(null);
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [detailError,   setDetailError]   = useState(null);
+
+  const loadDetail = useCallback(async () => {
+    if (!route.params?.id) return;
+    setDetailLoading(true);
+    setDetailError(null);
+    const res = await fetchOrderDetail(route.params.id);
+    setDetailLoading(false);
+    if (res.success) setDetail(res.order);
+    else setDetailError(res.message);
+  }, [route.params?.id, fetchOrderDetail]);
+
+  useEffect(() => { loadDetail(); }, [loadDetail]);
+
+  // Merge: use enriched detail once loaded, fall back to list record
+  const order = detail || baseOrder;
 
   if (!order) {
     return <MissingRecord navigation={navigation} title="Order not found" />;
   }
 
-  // Debug: Check dispatch linking
-  console.log('OrderDetailScreen - order.id:', order.id);
-  console.log('OrderDetailScreen - order._id:', order._id);
-  console.log('OrderDetailScreen - All dispatches:', dispatches.map(d => ({ id: d.id, orderId: d.orderId, _orderId: d._orderId })));
-  
-  const linkedDispatches = dispatches.filter(item => item.orderId === order.id);
-  console.log('OrderDetailScreen - Linked dispatches:', linkedDispatches.length);
-  
-  const linkedInvoices = invoices.filter(item => item.orderId === order.id);
-  const remainingToDispatch = order.quantity - order.dispatched;
-  const remainingToDeliver = order.quantity - order.delivered;
-  const isHold = order.status === 'HOLD';
+  // Prefer enriched arrays from detail; fall back to global store filtered lists
+  const linkedDispatches = detail?.enrichedDispatches?.length
+    ? detail.enrichedDispatches
+    : dispatches.filter(d => d.orderId === order.id || d._orderId === order._id);
+
+  const linkedInvoices = detail?.enrichedInvoices?.length
+    ? detail.enrichedInvoices
+    : invoices.filter(i => i.orderId === order.id || i._orderId === order._id);
+
+  const ps                 = detail?.paymentSummary || {};
+  const totalInvoiced      = ps.totalInvoiced || 0;
+  const totalPaid          = ps.totalPaid     || 0;
+  const totalBalance       = ps.totalBalance  || 0;
+  const remainingToDispatch = Math.max(0, order.quantity - order.dispatched);
+  const remainingToDeliver  = Math.max(0, order.quantity - order.delivered);
+  const isHold             = order.status === 'HOLD';
+  const isDelivered        = order.status === 'DELIVERED';
+
   const currentStep = isHold
-    ? Math.max(0, ORDER_STEPS.findIndex(step => step.key === order.previousStatus))
-    : Math.max(
-        0,
-        ORDER_STEPS.findIndex(step =>
-          order.status === 'PARTIALLY_DELIVERED'
-            ? step.key === 'OUT_FOR_DELIVERY'
-            : step.key === order.status,
-        ),
-      );
+    ? Math.max(0, ORDER_STEPS.findIndex(s => s.key === order.previousStatus))
+    : Math.max(0, ORDER_STEPS.findIndex(s => s.key === order.status));
+
+  const payBgColor = totalBalance === 0 && totalInvoiced > 0
+    ? colors.successSoft
+    : totalPaid > 0
+    ? colors.warningSoft
+    : colors.navySoft;
+  const payFgColor = totalBalance === 0 && totalInvoiced > 0
+    ? colors.success
+    : totalPaid > 0
+    ? colors.warning
+    : colors.navy;
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={() => { onRefresh(); loadDetail(); }}>
+      {/* ── Header ── */}
       <AppHeader
         navigation={navigation}
         showBack
         showNotifications={false}
-        subtitle={`Quote ${order.quotationId}`}
+        subtitle={order.enquiryCode ? `Ref: ${order.enquiryCode}` : 'Sales Order'}
         title={order.id}
       />
+
+      {/* ── Hero banner ── */}
       <View style={styles.orderHero}>
         <View style={styles.orderHeroTop}>
           <View style={styles.orderHeroIcon}>
@@ -347,9 +384,7 @@ export const OrderDetailScreen = ({ navigation, route }) => {
           </View>
           <View style={styles.flexText}>
             <Text style={styles.orderHeroEyebrow}>SALES ORDER</Text>
-            <Text numberOfLines={1} style={styles.orderHeroId}>
-              {order.id}
-            </Text>
+            <Text numberOfLines={1} style={styles.orderHeroId}>{order.id}</Text>
           </View>
           <StatusPill status={order.status} />
         </View>
@@ -362,15 +397,23 @@ export const OrderDetailScreen = ({ navigation, route }) => {
               </Text>
             </View>
             <View style={styles.flexText}>
-              <Text numberOfLines={1} style={styles.orderHeroCustomer}>
-                {order.customerName}
-              </Text>
-              <View style={styles.orderHeroMetaRow}>
-                <Icon color={colors.textMuted} name="store-outline" size={14} />
-                <Text numberOfLines={1} style={styles.orderHeroSupplier}>
-                  {order.wholesaler}
-                </Text>
-              </View>
+              <Text numberOfLines={1} style={styles.orderHeroCustomer}>{order.customerName}</Text>
+              {order.customerMobile ? (
+                <Pressable
+                  accessibilityLabel={`Call ${order.customerName}`}
+                  onPress={() => Linking.openURL(`tel:${order.customerMobile}`)}
+                  style={styles.orderHeroMetaRow}>
+                  <Icon color={colors.primary} name="phone-outline" size={13} />
+                  <Text style={[styles.orderHeroSupplier, { color: colors.primary }]}>
+                    {order.customerMobile}
+                  </Text>
+                </Pressable>
+              ) : (
+                <View style={styles.orderHeroMetaRow}>
+                  <Icon color={colors.textMuted} name="store-outline" size={14} />
+                  <Text numberOfLines={1} style={styles.orderHeroSupplier}>{order.wholesaler}</Text>
+                </View>
+              )}
             </View>
           </View>
 
@@ -381,31 +424,131 @@ export const OrderDetailScreen = ({ navigation, route }) => {
             </Text>
           </View>
         </View>
+
+        {/* Assignment chip */}
+        {order.assignedToName ? (
+          <View style={styles.assignmentChip}>
+            <Icon color={colors.primary} name="account-check-outline" size={15} />
+            <View style={styles.flexText}>
+              <Text style={styles.assignmentChipName}>
+                {order.assignedToName}
+                {order.assignedToDesignation ? ` · ${order.assignedToDesignation}` : ''}
+              </Text>
+              {order.assignedDate ? (
+                <Text style={styles.assignmentChipDate}>Assigned {order.assignedDate}</Text>
+              ) : null}
+            </View>
+            {order.assignedToMobile ? (
+              <Pressable
+                accessibilityLabel="Call assigned staff"
+                onPress={() => Linking.openURL(`tel:${order.assignedToMobile}`)}>
+                <Icon color={colors.primary} name="phone-outline" size={16} />
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
       </View>
 
+      {/* ── Quantity dashboard ── */}
       <View style={styles.quantityDashboard}>
-        <QuantityBlock label="Ordered" tone="navy" value={order.quantity} />
-        <QuantityBlock label="Packed" value={order.picked} />
-        <QuantityBlock label="Dispatched" value={order.dispatched} />
-        <QuantityBlock label="Delivered" value={order.delivered} />
+        <QuantityBlock label="Ordered"    tone="navy" value={order.quantity} />
+        <QuantityBlock label="Packed"               value={order.picked} />
+        <QuantityBlock label="Dispatched"            value={order.dispatched} />
+        <QuantityBlock label="Delivered"  tone={order.delivered > 0 ? 'success' : undefined} value={order.delivered} />
       </View>
 
-      <SurfaceCard>
+      {/* ── Payment summary ── */}
+      {detailLoading ? (
+        <SurfaceCard style={styles.cardSpacing}>
+          <View style={styles.loadingRow}>
+            <Icon color={colors.textMuted} name="loading" size={18} />
+            <Text style={styles.loadingText}>Loading payment details…</Text>
+          </View>
+        </SurfaceCard>
+      ) : detailError ? (
+        <NoticeBanner
+          icon="alert-circle-outline"
+          message={detailError}
+          title="Could not load full details"
+          tone="warning"
+          style={styles.inlineNotice}
+        />
+      ) : totalInvoiced > 0 ? (
+        <SurfaceCard style={styles.cardSpacing}>
+          <Text style={styles.cardEyebrow}>FINANCIALS</Text>
+          <Text style={styles.cardHeading}>Payment summary</Text>
+
+          <View style={styles.paymentSummaryGrid}>
+            <View style={[styles.paymentSummaryBox, { backgroundColor: colors.navySoft }]}>
+              <Text style={[styles.paymentSummaryLabel, { color: colors.navy }]}>INVOICED</Text>
+              <Text style={[styles.paymentSummaryValue, { color: colors.navy }]}>
+                {formatCurrency(totalInvoiced)}
+              </Text>
+              <Text style={styles.paymentSummaryHint}>
+                {linkedInvoices.length} invoice{linkedInvoices.length !== 1 ? 's' : ''}
+              </Text>
+            </View>
+            <View style={[styles.paymentSummaryBox, { backgroundColor: colors.successSoft }]}>
+              <Text style={[styles.paymentSummaryLabel, { color: colors.success }]}>COLLECTED</Text>
+              <Text style={[styles.paymentSummaryValue, { color: colors.success }]}>
+                {formatCurrency(totalPaid)}
+              </Text>
+              <Text style={styles.paymentSummaryHint}>
+                {totalInvoiced > 0 ? `${Math.round((totalPaid / totalInvoiced) * 100)}%` : '—'}
+              </Text>
+            </View>
+            <View style={[styles.paymentSummaryBox, { backgroundColor: totalBalance > 0 ? colors.dangerSoft : colors.successSoft }]}>
+              <Text style={[styles.paymentSummaryLabel, { color: totalBalance > 0 ? colors.danger : colors.success }]}>
+                BALANCE
+              </Text>
+              <Text style={[styles.paymentSummaryValue, { color: totalBalance > 0 ? colors.danger : colors.success }]}>
+                {formatCurrency(totalBalance)}
+              </Text>
+              <Text style={styles.paymentSummaryHint}>
+                {totalBalance === 0 ? 'Fully paid' : 'Outstanding'}
+              </Text>
+            </View>
+          </View>
+
+          {totalBalance === 0 && totalInvoiced > 0 ? (
+            <View style={styles.paidFullBadge}>
+              <Icon color={colors.success} name="check-circle-outline" size={15} />
+              <Text style={styles.paidFullText}>Order fully paid</Text>
+            </View>
+          ) : totalBalance > 0 && totalPaid > 0 ? (
+            <View style={styles.partialPayBadge}>
+              <Icon color={colors.warning} name="clock-alert-outline" size={15} />
+              <Text style={styles.partialPayText}>
+                Partial payment received · {formatCurrency(totalBalance)} still due
+              </Text>
+            </View>
+          ) : null}
+        </SurfaceCard>
+      ) : null}
+
+      {/* ── Fulfilment progress ── */}
+      <SurfaceCard style={styles.cardSpacing}>
         <View style={styles.sectionTitleRow}>
           <View style={styles.flexText}>
             <Text style={styles.cardEyebrow}>FULFILMENT</Text>
             <Text style={styles.cardHeading}>Progress by quantity</Text>
           </View>
-          <View style={styles.remainingBadge}>
-            <Text style={styles.remainingText}>{remainingToDispatch} to dispatch</Text>
-          </View>
+          {remainingToDispatch > 0 ? (
+            <View style={styles.remainingBadge}>
+              <Text style={styles.remainingText}>{remainingToDispatch} to dispatch</Text>
+            </View>
+          ) : (
+            <View style={[styles.remainingBadge, { backgroundColor: colors.successSoft }]}>
+              <Text style={[styles.remainingText, { color: colors.success }]}>All dispatched</Text>
+            </View>
+          )}
         </View>
-        <ProgressLabel label="Packing" total={order.quantity} value={order.picked} />
+        <ProgressLabel label="Packing"  total={order.quantity} value={order.picked} />
         <ProgressLabel label="Dispatch" total={order.quantity} value={order.dispatched} />
         <ProgressLabel label="Delivery" total={order.quantity} value={order.delivered} />
         {remainingToDeliver > 0 && order.delivered > 0 ? (
           <NoticeBanner
-            message={`${order.delivered} delivered, ${remainingToDeliver} still open.`}
+            message={`${order.delivered} delivered · ${remainingToDeliver} still pending.`}
             title="Partial delivery in progress"
             tone="warning"
             style={styles.inlineNotice}
@@ -413,22 +556,70 @@ export const OrderDetailScreen = ({ navigation, route }) => {
         ) : null}
       </SurfaceCard>
 
+      {/* ── Order information ── */}
       <SurfaceCard style={styles.cardSpacing}>
         <Text style={styles.cardEyebrow}>ORDER INFORMATION</Text>
         <Text style={styles.cardHeading}>Details</Text>
-        <InfoRow label="Product" value={`${order.productName} (${order.productCode})`} />
+        <InfoRow label="Product"  value={`${order.productName}${order.productCode ? ` (${order.productCode})` : ''}`} />
         <InfoRow label="Quantity" value={`${order.quantity} ${order.unit}`} />
-        <InfoRow label="Rate" value={formatCurrency(order.rate)} />
-        <InfoRow label="Quotation" value={order.quotationId} />
-        <InfoRow label="Order source" value="Accepted Quotation" />
+        <InfoRow label="Rate"     value={formatCurrency(order.rate)} />
+        <InfoRow label="Subtotal" value={formatCurrency(order.subtotal)} />
+        <InfoRow label={`GST (${order.gstPercent || 18}%)`} value={formatCurrency(order.gstAmount)} />
+        <InfoRow label="Total"    value={formatCurrency(order.total)} valueColor={colors.navy} />
+        {order.branchName  ? <InfoRow label="Branch"   value={order.branchName}  /> : null}
+        {order.quotationId ? <InfoRow label="Quotation" value={order.quotationId} /> : null}
+        {order.enquiryCode ? <InfoRow label="Enquiry ref" value={order.enquiryCode} /> : null}
+        <InfoRow label="Order date"        value={order.orderDate} />
         <InfoRow label="Expected delivery" value={order.expectedDelivery} />
-        <InfoRow label="Delivery address" value={order.deliveryAddress} />
+        {order.deliveryAddress ? <InfoRow label="Delivery address" value={order.deliveryAddress} /> : null}
+        {order.notes ? <InfoRow label="Notes" value={order.notes} /> : null}
+        {order.createdByName ? (
+          <InfoRow label="Created by" value={`${order.createdByName}${order.createdByType ? ` (${order.createdByType})` : ''}`} />
+        ) : null}
       </SurfaceCard>
 
+      {/* ── Unified Order Status Timeline ── */}
       <SurfaceCard style={styles.workflowCard}>
         <Text style={styles.cardEyebrow}>ORDER STATUS</Text>
-        <Text style={styles.cardHeading}>Current progress</Text>
 
+        {/* ── Cancelled banner ── */}
+        {order.status === 'CANCELLED' ? (() => {
+          const cancelEntry = (order.timeline || []).find(e => e.rawStatus === 'Cancelled' || e.status === 'CANCELLED');
+          return (
+            <View style={styles.cancelledCard}>
+              <View style={styles.cancelledIconRow}>
+                <View style={styles.cancelledIconWrap}>
+                  <Icon color={colors.danger} name="close-circle-outline" size={28} />
+                </View>
+                <View style={styles.cancelledTextCol}>
+                  <Text style={styles.cancelledTitle}>Order Cancelled</Text>
+                  {cancelEntry?.at ? (
+                    <Text style={styles.cancelledMeta}>
+                      {cancelEntry.at}
+                      {cancelEntry.by ? <Text style={styles.cancelledBy}> · {cancelEntry.by}</Text> : null}
+                    </Text>
+                  ) : null}
+                  {cancelEntry?.remarks ? (
+                    <Text style={styles.cancelledRemarks}>{cancelEntry.remarks}</Text>
+                  ) : null}
+                </View>
+              </View>
+              {/* Show progress up to point of cancellation */}
+              {order.previousStatus ? (
+                <View style={styles.cancelledPrior}>
+                  <Icon color={colors.textMuted} name="information-outline" size={13} />
+                  <Text style={styles.cancelledPriorText}>
+                    Was at: <Text style={{ fontWeight: '700' }}>
+                      {ORDER_STEPS.find(s => s.key === order.previousStatus)?.label || order.previousStatus}
+                    </Text> before cancellation
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          );
+        })() : null}
+
+        {/* ── Hold banner ── */}
         {isHold ? (
           <NoticeBanner
             icon="pause-circle-outline"
@@ -439,61 +630,86 @@ export const OrderDetailScreen = ({ navigation, route }) => {
           />
         ) : null}
 
-        <View style={styles.statusTrack}>
-          {ORDER_STEPS.map((step, index) => {
-            const done = index < currentStep;
-            const active = index === currentStep && !isHold;
-            const isLast = index === ORDER_STEPS.length - 1;
+        {/* ── Normal 6-stage timeline (hidden when cancelled) ── */}
+        {order.status !== 'CANCELLED' ? (() => {
+          const stageMap = {};
+          (order.timeline || []).forEach(entry => {
+            const key = entry.status;
+            if (key && !stageMap[key]) stageMap[key] = entry;
+          });
+
+          const activeKey = ORDER_STEPS[currentStep]?.key;
+          if (activeKey && !stageMap[activeKey]) {
+            stageMap[activeKey] = {
+              status:    activeKey,
+              rawStatus: order.rawStatus || '',
+              by:        order.assignedToName || '',
+              remarks:   '',
+              at:        order.orderDate || '',
+            };
+          }
+
+          return ORDER_STEPS.map((step, index) => {
+            const isDone    = index < currentStep;
+            const isActive  = index === currentStep && !isHold;
+            const isPending = index > currentStep;
+            const isLast    = index === ORDER_STEPS.length - 1;
+            const entry     = stageMap[step.key];
+
             return (
               <View key={step.key} style={styles.statusStep}>
                 <View style={styles.statusStepIconCol}>
-                  <View
-                    style={[
-                      styles.statusStepDot,
-                      (done || active) && styles.statusStepDotDone,
-                      active && styles.statusStepDotActive,
-                    ]}>
+                  <View style={[
+                    styles.statusStepDot,
+                    (isDone || isActive) && styles.statusStepDotDone,
+                    isActive && styles.statusStepDotActive,
+                  ]}>
                     <Icon
-                      color={done || active ? colors.onNavy : colors.textMuted}
-                      name={done ? 'check' : step.icon}
+                      color={isDone || isActive ? colors.onNavy : colors.textMuted}
+                      name={isDone ? 'check' : step.icon}
                       size={15}
                     />
                   </View>
-                  {!isLast ? (
-                    <View
-                      style={[
-                        styles.statusStepLine,
-                        done && styles.statusStepLineDone,
-                      ]}
-                    />
-                  ) : null}
+                  {!isLast && (
+                    <View style={[styles.statusStepLine, isDone && styles.statusStepLineDone]} />
+                  )}
                 </View>
-                <View style={styles.statusStepTextCol}>
-                  <Text
-                    style={[
+                <View style={[styles.statusStepTextCol, !isLast && styles.statusStepTextColSpaced]}>
+                  <View style={styles.statusStepRowTop}>
+                    <Text style={[
                       styles.statusStepLabel,
-                      (done || active) && styles.statusStepLabelDone,
+                      (isDone || isActive) && styles.statusStepLabelDone,
+                      isPending && styles.statusStepLabelPending,
                     ]}>
-                    {step.label}
-                  </Text>
-                  {active ? (
-                    <Text style={styles.statusStepCurrent}>Current stage</Text>
-                  ) : null}
+                      {step.label}
+                    </Text>
+                    {isActive && !isHold ? (
+                      <View style={styles.statusActivePill}>
+                        <Text style={styles.statusActivePillText}>Current</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  {(isDone || isActive) && entry && entry.at ? (
+                    <Text style={styles.statusStepMeta}>
+                      {entry.at}
+                      {entry.by ? <Text style={styles.statusStepMetaBy}> · {entry.by}</Text> : null}
+                      {entry.remarks ? (
+                        <Text>{'\n'}{entry.remarks}</Text>
+                      ) : null}
+                    </Text>
+                  ) : (isDone || isActive) ? (
+                    <Text style={styles.statusStepMeta}>Completed</Text>
+                  ) : (
+                    <Text style={styles.statusStepPending}>Pending</Text>
+                  )}
                 </View>
               </View>
             );
-          })}
-        </View>
-
-        <View style={styles.statusReadonlyNote}>
-          <Icon color={colors.textMuted} name="information-outline" size={15} />
-          <Text style={styles.statusReadonlyText}>
-            Status is updated automatically as the order moves through
-            fulfilment. This is a view-only summary.
-          </Text>
-        </View>
+          });
+        })() : null}
       </SurfaceCard>
 
+      {/* ── Dispatches ── */}
       <SectionHeader
         actionLabel="View all"
         onAction={() => navigation.navigate('Dispatches', { orderId: order.id })}
@@ -501,16 +717,86 @@ export const OrderDetailScreen = ({ navigation, route }) => {
       />
       {linkedDispatches.length ? (
         linkedDispatches.map(dispatch => (
-          <RelationListCard
-            accessibilityLabel={`Open dispatch ${dispatch.id}`}
-            icon="truck-fast-outline"
-            key={dispatch.id}
-            meta={`${dispatch.quantity} ${order.unit} · ${dispatch.driverName}`}
-            onPress={() => navigation.navigate('DispatchDetail', { id: dispatch.id })}
-            status={dispatch.status}
-            title={dispatch.id}
-            tone="orange"
-          />
+          <SurfaceCard key={dispatch.id} style={styles.dispatchCard}>
+            <View style={styles.dispatchCardTop}>
+              <View style={styles.odDispatchIcon}>
+                <Icon color={colors.primary} name="truck-fast-outline" size={18} />
+              </View>
+              <View style={styles.flexText}>
+                <Text style={styles.dispatchId}>{dispatch.id}</Text>
+                <Text style={styles.dispatchMeta}>
+                  {dispatch.quantity} {order.unit}
+                  {dispatch.invoiceNumber ? ` · ${dispatch.invoiceNumber}` : ''}
+                </Text>
+              </View>
+              <StatusPill status={dispatch.status || dispatch.rawStatus} />
+            </View>
+
+            <View style={styles.dispatchInfoGrid}>
+              {dispatch.driverName && dispatch.driverName !== '—' ? (
+                <View style={styles.dispatchInfoItem}>
+                  <Icon color={colors.textMuted} name="account-outline" size={13} />
+                  <Text style={styles.dispatchInfoText}>{dispatch.driverName}</Text>
+                  {dispatch.driverMobile && dispatch.driverMobile !== '—' ? (
+                    <Pressable onPress={() => Linking.openURL(`tel:${dispatch.driverMobile}`)}>
+                      <Icon color={colors.primary} name="phone-outline" size={13} />
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+              {dispatch.vehicleNumber && dispatch.vehicleNumber !== '—' ? (
+                <View style={styles.dispatchInfoItem}>
+                  <Icon color={colors.textMuted} name="car-outline" size={13} />
+                  <Text style={styles.dispatchInfoText}>{dispatch.vehicleNumber}</Text>
+                </View>
+              ) : null}
+              {dispatch.transport && dispatch.transport !== '—' ? (
+                <View style={styles.dispatchInfoItem}>
+                  <Icon color={colors.textMuted} name="truck-outline" size={13} />
+                  <Text style={styles.dispatchInfoText}>{dispatch.transport}</Text>
+                </View>
+              ) : null}
+              {dispatch.lrNumber && dispatch.lrNumber !== '—' ? (
+                <View style={styles.dispatchInfoItem}>
+                  <Icon color={colors.textMuted} name="file-document-outline" size={13} />
+                  <Text style={styles.dispatchInfoText}>LR: {dispatch.lrNumber}</Text>
+                </View>
+              ) : null}
+            </View>
+
+            <View style={styles.dispatchDates}>
+              <View style={styles.dispatchDateItem}>
+                <Text style={styles.dispatchDateLabel}>Dispatched</Text>
+                <Text style={styles.dispatchDateValue}>{dispatch.dispatchDate || '—'}</Text>
+              </View>
+              <View style={styles.dispatchDateItem}>
+                <Text style={styles.dispatchDateLabel}>Expected</Text>
+                <Text style={styles.dispatchDateValue}>{dispatch.expectedDelivery || '—'}</Text>
+              </View>
+              <View style={styles.dispatchDateItem}>
+                <Text style={styles.dispatchDateLabel}>Delivered</Text>
+                <Text style={[styles.dispatchDateValue,
+                  (dispatch.status === 'DELIVERED' || dispatch.rawStatus === 'Delivered') && { color: colors.success }]}>
+                  {dispatch.deliveredDate || '—'}
+                </Text>
+              </View>
+            </View>
+
+            {dispatch.notes ? (
+              <View style={styles.dispatchNotes}>
+                <Icon color={colors.textMuted} name="note-text-outline" size={13} />
+                <Text style={styles.dispatchNotesText}>{dispatch.notes}</Text>
+              </View>
+            ) : null}
+
+            <Pressable
+              accessibilityLabel={`Open full dispatch ${dispatch.id}`}
+              onPress={() => navigation.navigate('DispatchDetail', { id: dispatch.id })}
+              style={styles.dispatchViewMore}>
+              <Text style={styles.dispatchViewMoreText}>View full dispatch</Text>
+              <Icon color={colors.primary} name="arrow-right" size={15} />
+            </Pressable>
+          </SurfaceCard>
         ))
       ) : (
         <EmptyState
@@ -521,28 +807,179 @@ export const OrderDetailScreen = ({ navigation, route }) => {
         />
       )}
 
-      <SectionHeader title={`Invoices (${linkedInvoices.length})`} />
+      {/* ── Invoices ── */}
+      <SectionHeader
+        actionLabel={linkedInvoices.length ? 'View all' : undefined}
+        onAction={linkedInvoices.length ? () => navigation.navigate('Invoices', { orderId: order.id }) : undefined}
+        title={`Invoices (${linkedInvoices.length})`}
+      />
       {linkedInvoices.length ? (
         linkedInvoices.map(invoice => (
-          <RelationListCard
-            accessibilityLabel={`Open invoice ${invoice.id}`}
-            icon="text-box-outline"
-            key={invoice.id}
-            meta={`${invoice.quantity} ${invoice.unit} · ${formatCurrency(invoice.total)}`}
-            onPress={() => navigation.navigate('InvoiceDetail', { id: invoice.id })}
-            status={invoice.status}
-            title={invoice.id}
-            tone="navy"
-          />
+          <SurfaceCard key={invoice.id} style={styles.odInvoiceCard}>
+            <View style={styles.invoiceCardTop}>
+              <View style={styles.invoiceIcon}>
+                <Icon color={colors.navy} name="text-box-outline" size={18} />
+              </View>
+              <View style={styles.flexText}>
+                <Text style={styles.odInvoiceId}>{invoice.id}</Text>
+                <Text style={styles.invoiceMeta}>
+                  {invoice.quantity} {invoice.unit || order.unit}
+                  {invoice.invoiceDate && invoice.invoiceDate !== '—' ? ` · ${invoice.invoiceDate}` : ''}
+                </Text>
+              </View>
+              <StatusPill status={invoice.status || invoice.rawStatus} />
+            </View>
+
+            <View style={styles.invoiceAmountRow}>
+              <View style={styles.invoiceAmountItem}>
+                <Text style={styles.invoiceAmountLabel}>Total</Text>
+                <Text style={styles.invoiceAmountValue}>{formatCurrency(invoice.total)}</Text>
+              </View>
+              <View style={styles.invoiceAmountItem}>
+                <Text style={styles.invoiceAmountLabel}>Paid</Text>
+                <Text style={[styles.invoiceAmountValue, { color: invoice.paidAmount > 0 ? colors.success : colors.textMuted }]}>
+                  {formatCurrency(invoice.paidAmount)}
+                </Text>
+              </View>
+              <View style={styles.invoiceAmountItem}>
+                <Text style={styles.invoiceAmountLabel}>Balance</Text>
+                <Text style={[styles.invoiceAmountValue, { color: invoice.balance > 0 ? colors.danger : colors.success }]}>
+                  {formatCurrency(invoice.balance)}
+                </Text>
+              </View>
+            </View>
+
+            {/* Payment history */}
+            {invoice.paymentHistory?.length > 0 ? (
+              <View style={styles.paymentHistoryBox}>
+                <Text style={styles.paymentHistoryTitle}>
+                  Payment history ({invoice.paymentHistory.length})
+                </Text>
+                {(() => {
+                  // Oldest-first so we can number payments and show running balance.
+                  const ordered = [...invoice.paymentHistory].sort(
+                    (a, b) => new Date(a._date || a.date) - new Date(b._date || b.date),
+                  );
+                  let runningPaid = 0;
+                  const total = invoice.total || 0;
+                  const ordinal = n => {
+                    const s = ['th', 'st', 'nd', 'rd'];
+                    const v = n % 100;
+                    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+                  };
+                  return ordered.map((ph, i) => {
+                    runningPaid += Number(ph.amount) || 0;
+                    const balAfter = Math.max(0, total - runningPaid);
+                    const isVerified = (ph.verificationStatus || '') === 'Verified';
+                    return (
+                      <View key={i} style={styles.paymentHistoryItem}>
+                        <View style={styles.paymentHistoryItemHeader}>
+                          <View style={styles.paymentHistorySeqBadge}>
+                            <Text style={styles.paymentHistorySeqText}>
+                              {ordered.length > 1 ? ordinal(i + 1) : '1st'}
+                            </Text>
+                          </View>
+                          <Text style={styles.paymentHistoryAmount}>
+                            {formatCurrency(ph.amount)}
+                          </Text>
+                          <View style={{ flex: 1 }} />
+                          <Icon
+                            color={isVerified ? colors.success : colors.warning}
+                            name={isVerified ? 'check-decagram' : 'clock-outline'}
+                            size={15}
+                          />
+                          <Text style={[
+                            styles.paymentHistoryStatus,
+                            { color: isVerified ? colors.success : colors.warning },
+                          ]}>
+                            {isVerified ? 'Verified' : 'Pending'}
+                          </Text>
+                        </View>
+                        <Text style={styles.paymentHistoryMetaLine}>
+                          {ph.mode || '—'}
+                          {ph.reference ? ` · ${ph.reference}` : ''}
+                          {ph.date ? ` · ${ph.date}` : ''}
+                        </Text>
+                        <View style={styles.paymentHistoryBalRow}>
+                          {ph.by ? (
+                            <Text style={styles.paymentHistoryBy}>Collected by {ph.by}</Text>
+                          ) : <View />}
+                          <Text style={styles.paymentHistoryBal}>
+                            Balance: {formatCurrency(balAfter)}
+                          </Text>
+                        </View>
+                        {/* Paid progress after this payment */}
+                        {(() => {
+                          const pct = total > 0 ? Math.min(100, Math.round((runningPaid / total) * 100)) : 0;
+                          const done = balAfter === 0;
+                          return (
+                            <View style={styles.payProgressRow}>
+                              <View style={styles.payProgressTrack}>
+                                <View style={[
+                                  styles.payProgressFill,
+                                  { width: `${pct}%`, backgroundColor: done ? colors.success : pct >= 50 ? colors.warning : colors.danger },
+                                ]} />
+                              </View>
+                              <Text style={styles.payProgressLabel}>
+                                {done ? 'Fully paid' : `${pct}% paid`}
+                              </Text>
+                            </View>
+                          );
+                        })()}
+                      </View>
+                    );
+                  });
+                })()}
+              </View>
+            ) : null}
+
+            {invoice.dueDate && invoice.dueDate !== '—' && invoice.balance > 0 ? (
+              <View style={styles.invoiceDueRow}>
+                <Icon color={colors.warning} name="calendar-clock-outline" size={14} />
+                <Text style={styles.invoiceDueText}>Due {invoice.dueDate}</Text>
+              </View>
+            ) : null}
+
+            <Pressable
+              accessibilityLabel={`Open full invoice ${invoice.id}`}
+              onPress={() => navigation.navigate('InvoiceDetail', { id: invoice.id })}
+              style={styles.dispatchViewMore}>
+              <Text style={styles.dispatchViewMoreText}>View full invoice</Text>
+              <Icon color={colors.primary} name="arrow-right" size={15} />
+            </Pressable>
+          </SurfaceCard>
         ))
       ) : (
         <EmptyState
           compact
           icon="text-box-outline"
-          message="The invoice will be generated against the actual dispatch quantity."
+          message="Invoice will be generated against the actual dispatch quantity."
           title="No linked invoices"
         />
       )}
+
+      {/* ── Quick action: collect payment ── */}
+      {linkedInvoices.some(inv => inv.balance > 0) ? (
+        <SurfaceCard style={[styles.cardSpacing, { marginBottom: 8 }]}>
+          <View style={styles.collectActionRow}>
+            <View style={styles.collectActionIcon}>
+              <Icon color={colors.primary} name="hand-coin-outline" size={22} />
+            </View>
+            <View style={styles.flexText}>
+              <Text style={styles.collectActionTitle}>Collect payment</Text>
+              <Text style={styles.collectActionSub}>
+                {formatCurrency(totalBalance)} outstanding across {linkedInvoices.filter(i => i.balance > 0).length} invoice(s)
+              </Text>
+            </View>
+            <Pressable
+              accessibilityLabel="Go to collections"
+              onPress={() => navigation.navigate('Collections')}
+              style={styles.collectActionBtn}>
+              <Text style={styles.collectActionBtnText}>Collect</Text>
+            </Pressable>
+          </View>
+        </SurfaceCard>
+      ) : null}
     </Screen>
   );
 };
@@ -738,16 +1175,15 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
     return <MissingRecord navigation={navigation} title="Dispatch not found" />;
   }
 
-  const order = orders.find(item => item.id === dispatch.orderId);
-  const invoice = invoices.find(item => item.dispatchId === dispatch.id);
-  const currentStep = Math.max(
-    0,
-    DISPATCH_STEPS.findIndex(step => step.key === dispatch.status),
-  );
+  const order       = orders.find(item => item.id === dispatch.orderId);
+  const invoice     = invoices.find(item => item.dispatchId === dispatch.id);
   const isDelivered = dispatch.status === 'DELIVERED';
+  const isInTransit = dispatch.status === 'IN_TRANSIT';
   const otpVerified = dispatch.deliveryOtpStatus === 'OTP_VERIFIED';
-  const destination = order?.deliveryAddress?.split(',')[0];
-  const hasValue = value => value && value !== '—';
+  const hasValue    = v => v && v !== '—';
+
+  const currentStep = Math.max(0, DISPATCH_STEPS.findIndex(s => s.key === dispatch.status));
+
   const callDriver = () => {
     if (hasValue(dispatch.driverMobile)) {
       Linking.openURL(`tel:${dispatch.driverMobile}`).catch(() => {});
@@ -760,105 +1196,92 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
         navigation={navigation}
         showBack
         showNotifications={false}
-        subtitle={`Sales order ${dispatch.orderId}`}
+        subtitle={`Order · ${dispatch.orderId}`}
         title={dispatch.id}
       />
 
-      {/* ── Delivery Success Banner (only for delivered dispatches) ── */}
+      {/* ── Status banner for delivered ── */}
       {isDelivered && (
         <NoticeBanner
           icon="check-decagram"
-          message={`Successfully delivered on ${dispatch.deliveredDate || dispatch.expectedDelivery}${otpVerified ? ' · OTP verified' : ''}`}
+          message={`Delivered on ${dispatch.deliveredDate || '—'}${otpVerified ? ' · OTP verified' : ''}`}
           title="Delivery Completed"
           tone="success"
           style={styles.deliverySuccessBanner}
         />
       )}
 
-      {/* ── Hero: quantity + customer + route ── */}
-      <View style={[styles.dispatchDetailHero, isDelivered && styles.dispatchDetailHeroDelivered]}>
-        <View style={styles.dispatchHeroTop}>
-          <View style={[styles.bigTruckIcon, isDelivered && styles.bigTruckIconDelivered]}>
-            <Icon color={isDelivered ? colors.success : colors.onNavy} name={isDelivered ? "check-decagram" : "truck-fast"} size={28} />
+      {/* ── Hero card ── */}
+      <SurfaceCard style={styles.ddHero}>
+        {/* Top row: icon + id + status */}
+        <View style={styles.ddHeroTop}>
+          <View style={[styles.ddHeroIcon, isDelivered && styles.ddHeroIconDone]}>
+            <Icon
+              color={isDelivered ? colors.success : isInTransit ? colors.primary : colors.navy}
+              name={isDelivered ? 'check-decagram' : isInTransit ? 'truck-fast' : 'truck-check-outline'}
+              size={22}
+            />
           </View>
           <View style={styles.flexText}>
-            <Text style={styles.dispatchHeroEyebrow}>{isDelivered ? 'DELIVERED' : 'DISPATCH'}</Text>
-            <Text numberOfLines={1} style={styles.dispatchHeroId}>
-              {dispatch.id}
-            </Text>
+            <Text style={styles.ddHeroCode}>{dispatch.id}</Text>
+            <Text style={styles.ddHeroOrderRef}>Sales Order · {dispatch.orderId}</Text>
           </View>
           <StatusPill status={dispatch.status} />
         </View>
 
-        <View style={styles.dispatchHeroQtyRow}>
-          <View style={styles.flexText}>
-            <Text style={styles.dispatchHeroQtyLabel}>QUANTITY</Text>
-            <Text style={styles.dispatchHeroQty}>
+        {/* Divider */}
+        <View style={styles.ddDivider} />
+
+        {/* Info grid: qty · product · customer · address */}
+        <View style={styles.ddInfoGrid}>
+          <View style={styles.ddInfoItem}>
+            <Text style={styles.ddInfoLabel}>QUANTITY</Text>
+            <Text style={styles.ddInfoValue}>
               {dispatch.quantity}{' '}
-              <Text style={styles.dispatchHeroUnit}>{order?.unit}</Text>
+              <Text style={styles.ddInfoUnit}>{dispatch.unit || order?.unit || ''}</Text>
             </Text>
           </View>
-          <View style={styles.dispatchHeroProductWrap}>
-            <Text style={styles.dispatchHeroQtyLabel}>PRODUCT</Text>
-            <Text numberOfLines={2} style={styles.dispatchHeroProduct}>
-              {order?.productName}
+          <View style={styles.ddInfoItem}>
+            <Text style={styles.ddInfoLabel}>PRODUCT</Text>
+            <Text numberOfLines={2} style={styles.ddInfoValue}>
+              {dispatch.productName || order?.productName || '—'}
             </Text>
           </View>
-        </View>
-
-        <View style={styles.dispatchRouteHero}>
-          <View style={styles.routeChip}>
-            <Icon color={colors.navy} name="account-outline" size={14} />
-            <Text numberOfLines={1} style={styles.routeChipText}>
-              {order?.customerName}
+          <View style={styles.ddInfoItem}>
+            <Text style={styles.ddInfoLabel}>CUSTOMER</Text>
+            <Text numberOfLines={1} style={styles.ddInfoValue}>
+              {dispatch.customerName || order?.customerName || '—'}
             </Text>
           </View>
-          <Icon color={isDelivered ? colors.success : colors.primary} name={isDelivered ? "check" : "arrow-right"} size={16} />
-          <View style={[styles.routeChip, isDelivered && styles.routeChipDelivered]}>
-            <Icon color={isDelivered ? colors.success : colors.primary} name={isDelivered ? "map-marker-check" : "map-marker-outline"} size={14} />
-            <Text numberOfLines={1} style={styles.routeChipText}>
-              {destination || 'Destination'}
+          <View style={styles.ddInfoItem}>
+            <Text style={styles.ddInfoLabel}>DESTINATION</Text>
+            <Text numberOfLines={2} style={styles.ddInfoValue}>
+              {dispatch.deliveryAddress || order?.deliveryAddress || '—'}
             </Text>
           </View>
         </View>
-      </View>
+      </SurfaceCard>
 
-      {/* ── Shipment progress steps ── */}
-      <SurfaceCard>
+      {/* ── Shipment progress ── */}
+      <SurfaceCard style={styles.cardSpacing}>
         <Text style={styles.cardEyebrow}>SHIPMENT STATUS</Text>
-        <Text style={styles.cardHeading}>Tracking</Text>
+        <Text style={styles.cardHeading}>Progress</Text>
         <View style={styles.stepper}>
           {DISPATCH_STEPS.map((step, index) => {
-            const done = index <= currentStep;
+            const done   = index <= currentStep;
             const active = index === currentStep;
             return (
               <React.Fragment key={step.key}>
                 <View style={styles.stepItem}>
-                  <View
-                    style={[
-                      styles.stepDot,
-                      done && styles.stepDotDone,
-                      active && styles.stepDotActive,
-                    ]}>
-                    <Icon
-                      color={done ? colors.onNavy : colors.textMuted}
-                      name={step.icon}
-                      size={16}
-                    />
+                  <View style={[styles.stepDot, done && styles.stepDotDone, active && styles.stepDotActive]}>
+                    <Icon color={done ? colors.onNavy : colors.textMuted} name={step.icon} size={16} />
                   </View>
-                  <Text
-                    numberOfLines={2}
-                    style={[styles.stepLabel, done && styles.stepLabelDone]}>
+                  <Text numberOfLines={2} style={[styles.stepLabel, done && styles.stepLabelDone]}>
                     {step.label}
                   </Text>
                 </View>
                 {index < DISPATCH_STEPS.length - 1 ? (
-                  <View
-                    style={[
-                      styles.stepLine,
-                      index < currentStep && styles.stepLineDone,
-                    ]}
-                  />
+                  <View style={[styles.stepLine, index < currentStep && styles.stepLineDone]} />
                 ) : null}
               </React.Fragment>
             );
@@ -866,150 +1289,141 @@ export const DispatchDetailScreen = ({ navigation, route }) => {
         </View>
       </SurfaceCard>
 
-      {/* ── Driver & vehicle ── */}
+      {/* ── Dates card ── */}
       <SurfaceCard style={styles.cardSpacing}>
-        <View style={styles.sectionTitleRow}>
+        <Text style={styles.cardEyebrow}>TIMELINE</Text>
+        <Text style={styles.cardHeading}>Key dates</Text>
+        <View style={styles.ddDatesGrid}>
+          <View style={styles.ddDateItem}>
+            <Icon color={colors.primary} name="truck-check-outline" size={18} />
+            <Text style={styles.ddDateLabel}>Dispatched</Text>
+            <Text style={styles.ddDateValue}>{dispatch.dispatchDate || '—'}</Text>
+          </View>
+          <View style={styles.ddDateItem}>
+            <Icon color={colors.warning} name="calendar-clock-outline" size={18} />
+            <Text style={styles.ddDateLabel}>Expected</Text>
+            <Text style={styles.ddDateValue}>{dispatch.expectedDelivery || '—'}</Text>
+          </View>
+          <View style={styles.ddDateItem}>
+            <Icon color={isDelivered ? colors.success : colors.textMuted} name="check-circle-outline" size={18} />
+            <Text style={styles.ddDateLabel}>Delivered</Text>
+            <Text style={[styles.ddDateValue, isDelivered && styles.ddDateValueDone]}>
+              {dispatch.deliveredDate || '—'}
+            </Text>
+          </View>
+        </View>
+      </SurfaceCard>
+
+      {/* ── Transport card ── */}
+      <SurfaceCard style={styles.cardSpacing}>
+        <View style={styles.ddTransportHeader}>
           <View style={styles.flexText}>
             <Text style={styles.cardEyebrow}>TRANSPORT</Text>
             <Text style={styles.cardHeading}>Driver & vehicle</Text>
           </View>
           {hasValue(dispatch.driverMobile) ? (
             <Pressable
-              accessibilityLabel={`Call driver ${dispatch.driverName}`}
+              accessibilityLabel={`Call ${dispatch.driverName}`}
               accessibilityRole="button"
               onPress={callDriver}
-              style={({ pressed }) => [
-                styles.callButton,
-                pressed && styles.pressablePressed,
-              ]}>
+              style={({ pressed }) => [styles.callButton, pressed && styles.pressablePressed]}>
               <Icon color={colors.onNavy} name="phone" size={16} />
               <Text style={styles.callButtonText}>Call</Text>
             </Pressable>
           ) : null}
         </View>
-        <View style={styles.driverRow}>
+
+        {/* Driver row */}
+        <View style={styles.ddDriverRow}>
           <View style={styles.driverAvatar}>
             <Icon color={colors.primary} name="account-tie-outline" size={22} />
           </View>
           <View style={styles.flexText}>
-            <Text numberOfLines={1} style={styles.driverName}>
-              {hasValue(dispatch.driverName)
-                ? dispatch.driverName
-                : 'Driver not assigned'}
+            <Text style={styles.driverName}>
+              {hasValue(dispatch.driverName) ? dispatch.driverName : 'Driver not assigned'}
             </Text>
             <Text style={styles.driverMobile}>
-              {hasValue(dispatch.driverMobile)
-                ? `+91 ${dispatch.driverMobile}`
-                : 'Mobile pending'}
+              {hasValue(dispatch.driverMobile) ? `+91 ${dispatch.driverMobile}` : 'Mobile pending'}
             </Text>
           </View>
         </View>
-        <InfoRow icon="car-outline" label="Vehicle" value={dispatch.vehicleNumber} />
-        <InfoRow icon="truck-fast-outline" label="Transport" value={dispatch.transport} />
-        <InfoRow icon="file-document-outline" label="LR number" value={dispatch.lrNumber} />
+
+        <View style={styles.ddTransportGrid}>
+          {hasValue(dispatch.vehicleNumber) ? (
+            <View style={styles.ddTransportChip}>
+              <Icon color={colors.textMuted} name="car-outline" size={15} />
+              <View>
+                <Text style={styles.ddChipLabel}>Vehicle</Text>
+                <Text style={styles.ddChipValue}>{dispatch.vehicleNumber}</Text>
+              </View>
+            </View>
+          ) : null}
+          {hasValue(dispatch.transport) ? (
+            <View style={styles.ddTransportChip}>
+              <Icon color={colors.textMuted} name="truck-outline" size={15} />
+              <View>
+                <Text style={styles.ddChipLabel}>Transport co.</Text>
+                <Text style={styles.ddChipValue}>{dispatch.transport}</Text>
+              </View>
+            </View>
+          ) : null}
+          {hasValue(dispatch.lrNumber) ? (
+            <View style={styles.ddTransportChip}>
+              <Icon color={colors.textMuted} name="file-document-outline" size={15} />
+              <View>
+                <Text style={styles.ddChipLabel}>LR Number</Text>
+                <Text style={styles.ddChipValue}>{dispatch.lrNumber}</Text>
+              </View>
+            </View>
+          ) : null}
+        </View>
       </SurfaceCard>
 
-      {/* ── Delivery timeline & OTP ── */}
-      <SurfaceCard style={styles.cardSpacing}>
-        <Text style={styles.cardEyebrow}>DELIVERY</Text>
-        <Text style={styles.cardHeading}>Timeline & verification</Text>
-        
-        {isDelivered ? (
-          <>
-            {/* Enhanced delivery summary for completed dispatches */}
-            <View style={styles.deliverySummaryBox}>
-              <View style={styles.deliverySummaryIcon}>
-                <Icon color={colors.white} name="check-decagram" size={36} />
-              </View>
-              <View style={styles.flexText}>
-                <Text style={[styles.deliverySummaryTitle, { color: colors.white }]}>
-                  Delivered Successfully
-                </Text>
-                <Text style={[styles.deliverySummaryDate, { color: colors.white }]}>
-                  {dispatch.deliveredDate || dispatch.expectedDelivery}
-                  {dispatch.deliveredTime ? ` at ${dispatch.deliveredTime}` : ''}
-                </Text>
-                {otpVerified && (
-                  <View style={styles.verifiedBadge}>
-                    <Icon color={colors.white} name="shield-check" size={14} />
-                    <Text style={[styles.verifiedBadgeText, { color: colors.white }]}>OTP Verified</Text>
-                  </View>
-                )}
-              </View>
-            </View>
-            
-            {/* Full timeline for reference */}
-            <View style={styles.timelineDivider} />
-            <Text style={styles.timelineSubheading}>Complete Journey</Text>
-            <TimelineRow icon="truck-check-outline" label="Dispatched" value={dispatch.dispatchDate} done />
-            <TimelineRow icon="truck-delivery-outline" label="In transit" value={dispatch.dispatchDate} done />
-            <TimelineRow icon="package-variant-closed" label="Delivered" value={dispatch.deliveredDate} done highlight />
-            {dispatch.deliveryNotes && (
-              <View style={styles.deliveryNotesBox}>
-                <Icon color={colors.textMuted} name="note-text-outline" size={16} />
-                <Text style={styles.deliveryNotes}>{dispatch.deliveryNotes}</Text>
-              </View>
-            )}
-          </>
-        ) : (
-          <>
-            {/* Active timeline for pending deliveries */}
-            <TimelineRow icon="truck-check-outline" label="Dispatched" value={dispatch.dispatchDate} />
-            <TimelineRow icon="calendar-clock-outline" label="Expected date" value={dispatch.expectedDelivery} />
-            <TimelineRow icon="clock-outline" label="Expected time" value={dispatch.expectedDeliveryTime} />
-            <TimelineRow icon="package-variant-closed" label="Delivered" value={dispatch.deliveredDate} pending />
-          </>
-        )}
-
-        {!isDelivered && (
-          <View
-            style={[styles.otpBadge, otpVerified ? styles.otpBadgeDone : styles.otpBadgePending]}>
-            <Icon
-              color={otpVerified ? colors.success : colors.warning}
-              name={otpVerified ? 'shield-check' : 'shield-alert-outline'}
-              size={20}
-            />
-            <View style={styles.flexText}>
-              <Text
-                style={[
-                  styles.otpBadgeTitle,
-                  { color: otpVerified ? colors.success : colors.warning },
-                ]}>
-                {otpVerified ? 'Delivery OTP verified' : 'Delivery OTP pending'}
-              </Text>
-              <Text style={styles.otpBadgeSub}>
-                {dispatch.deliveryOtpPurpose?.replace(/_/g, ' ') || 'Verification required'}
-              </Text>
-            </View>
+      {/* ── OTP status (only while not delivered) ── */}
+      {!isDelivered ? (
+        <View style={[styles.otpBadge, otpVerified ? styles.otpBadgeDone : styles.otpBadgePending, styles.cardSpacing]}>
+          <Icon
+            color={otpVerified ? colors.success : colors.warning}
+            name={otpVerified ? 'shield-check' : 'shield-alert-outline'}
+            size={20}
+          />
+          <View style={styles.flexText}>
+            <Text style={[styles.otpBadgeTitle, { color: otpVerified ? colors.success : colors.warning }]}>
+              {otpVerified ? 'Delivery OTP verified' : 'Delivery OTP pending'}
+            </Text>
+            <Text style={styles.otpBadgeSub}>Verification required on delivery</Text>
           </View>
-        )}
-      </SurfaceCard>
+        </View>
+      ) : null}
 
+      {/* ── Invoice link ── */}
       <NoticeBanner
-        icon="link-variant"
+        icon="text-box-check-outline"
         message={
           invoice
-            ? `${invoice.id} bills exactly ${invoice.quantity} ${invoice.unit} from this dispatch.`
-            : 'The invoice will be generated only after dispatch confirmation.'
+            ? `Invoice ${invoice.id} · ${invoice.quantity} ${invoice.unit || ''} · ₹${(invoice.total || 0).toLocaleString()}`
+            : 'Invoice will be generated after dispatch confirmation.'
         }
-        title="Dispatch-linked invoice"
+        title="Linked Invoice"
         tone={invoice ? 'success' : 'info'}
         style={styles.noticeSpacing}
       />
+
+      {/* ── Action buttons ── */}
       <View style={styles.linkedActions}>
         {invoice ? (
           <PrimaryButton
             icon="text-box-outline"
             onPress={() => navigation.navigate('InvoiceDetail', { id: invoice.id })}
             style={styles.linkedAction}
-            title={`View ${invoice.id}`}
+            title={`View Invoice · ${invoice.id}`}
           />
         ) : null}
         <PrimaryButton
           icon="clipboard-text-outline"
           onPress={() => navigation.navigate('OrderDetail', { id: dispatch.orderId })}
           style={styles.linkedAction}
-          title={`Open ${dispatch.orderId}`}
+          title={`Open Order · ${dispatch.orderId}`}
           variant={invoice ? 'outline' : 'primary'}
         />
       </View>
@@ -1113,7 +1527,7 @@ export const FinanceScreen = ({ navigation }) => {
             <SurfaceCard
               accessibilityLabel={`Open collection ${collection.id}, ${formatCurrency(collection.amount)}`}
               key={collection.id}
-              onPress={() => navigation.navigate('CollectionDetail', { id: collection.id })}
+              onPress={() => navigation.navigate('CollectionDetail', { id: collection.id, invoiceId: collection.invoiceId })}
               style={styles.paymentCard}>
               <View style={[styles.paymentCheck, !isVerified && styles.paymentCheckPending]}>
                 <Icon
@@ -1684,41 +2098,140 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
         </>
       ) : null}
 
-      <SectionHeader title={`Payments (${invoicePayments.length})`} />
-      {invoicePayments.length ? (
-        invoicePayments.map(payment => {
-          const isVerified = payment.status === 'VERIFIED';
-          return (
-            <View key={payment.id} style={[styles.paidCard, !isVerified && styles.paidCardPending]}>
-              <View style={[styles.paidIcon, !isVerified && styles.paidIconPending]}>
-                <Icon
-                  color={isVerified ? colors.success : colors.warning}
-                  name={isVerified ? 'check-decagram' : 'clock-outline'}
-                  size={24}
-                />
-              </View>
-              <View style={styles.paidText}>
-                <Text numberOfLines={2} style={[styles.paidTitle, !isVerified && styles.paidTitlePending]}>
-                  {payment.id} · {payment.status.replace(/_/g, ' ')}
+      {/* ── Payment history ── */}
+      {(() => {
+        // Merge backend payment_history (from fetched invoice) with any
+        // payments recorded in this session (from local payments state).
+        // Deduplicate by amount+date so a session payment that came back
+        // from the server in a re-fetch isn't shown twice.
+        const backendHistory = (invoice.paymentHistory || []);
+        const sessionPayments = invoicePayments.map(p => ({
+          amount:    p.amount,
+          mode:      p.mode,
+          reference: p.reference,
+          note:      '',
+          date:      p.date,
+          by:        p.createdBy,
+          status:    p.status,
+          _local:    true,
+        }));
+
+        // Deduplicate: if a session payment matches a backend entry closely
+        // (same amount + same date), prefer the backend entry.
+        const dedupedSession = sessionPayments.filter(sp =>
+          !backendHistory.some(bh =>
+            bh.amount === sp.amount && bh.date === sp.date,
+          ),
+        );
+
+        const allEntries = [...backendHistory, ...dedupedSession];
+
+        return (
+          <SurfaceCard style={styles.cardSpacing}>
+            <Text style={styles.cardEyebrow}>PAYMENT HISTORY</Text>
+            <Text style={styles.cardHeading}>
+              {allEntries.length
+                ? `${allEntries.length} payment${allEntries.length > 1 ? 's' : ''}`
+                : 'No payments yet'}
+            </Text>
+
+            {allEntries.length === 0 ? (
+              <View style={styles.payHistoryEmpty}>
+                <Icon color={colors.textMuted} name="cash-remove" size={28} />
+                <Text style={styles.payHistoryEmptyText}>
+                  No payments have been recorded for this invoice.
                 </Text>
-                <Text numberOfLines={2} style={styles.paidMessage}>
-                  {payment.mode} · {payment.date} · {payment.createdBy}
-                </Text>
               </View>
-              <Text numberOfLines={1} style={[styles.paidAmount, !isVerified && styles.paidAmountPending]}>
-                {formatCurrency(payment.amount)}
-              </Text>
-            </View>
-          );
-        })
-      ) : (
-        <EmptyState
-          compact
-          icon="cash-multiple"
-          message="Verified payment entries linked to this invoice will appear here."
-          title="No payments recorded"
-        />
-      )}
+            ) : (
+              allEntries.map((entry, idx) => {
+                const isVerified = entry.status === 'VERIFIED' || entry.status === 'COLLECTED';
+                const isLocal    = entry._local;
+                const isLast     = idx === allEntries.length - 1;
+                return (
+                  <View key={`${entry.date}-${idx}`} style={styles.payHistoryRow}>
+                    {/* Left: dot + connector */}
+                    <View style={styles.payHistoryLeftCol}>
+                      <View style={[
+                        styles.payHistoryDot,
+                        isVerified && styles.payHistoryDotDone,
+                        isLocal && styles.payHistoryDotLocal,
+                      ]}>
+                        <Icon
+                          color={isVerified ? colors.success : isLocal ? colors.warning : colors.textMuted}
+                          name={isVerified ? 'check-decagram' : isLocal ? 'clock-outline' : 'cash-outline'}
+                          size={15}
+                        />
+                      </View>
+                      {!isLast && <View style={styles.payHistoryConnector} />}
+                    </View>
+
+                    {/* Right: amount + meta */}
+                    <View style={[styles.payHistoryContent, !isLast && styles.payHistoryContentSpaced]}>
+                      {/* Top row: amount + status badge */}
+                      <View style={styles.payHistoryTopRow}>
+                        <Text style={styles.payHistoryAmount}>
+                          {formatCurrency(entry.amount)}
+                        </Text>
+                        <View style={[
+                          styles.payHistoryBadge,
+                          isLocal && styles.payHistoryBadgeLocal,
+                          !isVerified && !isLocal && styles.payHistoryBadgePending,
+                        ]}>
+                          <Text style={[
+                            styles.payHistoryBadgeText,
+                            isLocal && styles.payHistoryBadgeTextLocal,
+                            !isVerified && !isLocal && styles.payHistoryBadgeTextPending,
+                          ]}>
+                            {isLocal ? 'Pending sync' : (entry.status || 'COLLECTED').replace(/_/g, ' ')}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Mode + date + by */}
+                      <Text style={styles.payHistoryMeta}>
+                        {[entry.mode, entry.date].filter(Boolean).join(' · ')}
+                        {entry.by ? <Text style={styles.payHistoryBy}> · {entry.by}</Text> : null}
+                      </Text>
+
+                      {/* Reference */}
+                      {entry.reference ? (
+                        <Text style={styles.payHistoryRef}>Ref: {entry.reference}</Text>
+                      ) : null}
+
+                      {/* Note */}
+                      {entry.note ? (
+                        <Text style={styles.payHistoryNote}>{entry.note}</Text>
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })
+            )}
+
+            {/* Running totals footer */}
+            {allEntries.length > 0 && (
+              <View style={styles.payHistoryFooter}>
+                <View style={styles.payHistoryFooterRow}>
+                  <Text style={styles.payHistoryFooterLabel}>Total paid</Text>
+                  <Text style={styles.payHistoryFooterValue}>
+                    {formatCurrency(invoice.paidAmount)}
+                  </Text>
+                </View>
+                {invoice.balance > 0 && (
+                  <View style={styles.payHistoryFooterRow}>
+                    <Text style={[styles.payHistoryFooterLabel, { color: colors.danger }]}>
+                      Balance remaining
+                    </Text>
+                    <Text style={[styles.payHistoryFooterValue, { color: colors.danger }]}>
+                      {formatCurrency(invoice.balance)}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            )}
+          </SurfaceCard>
+        );
+      })()}
     </Screen>
   );
 };
@@ -1862,6 +2375,55 @@ const TimelineRow = ({ icon, label, value, done, pending, highlight }) => (
       <Text style={[styles.timelineValue, done && styles.timelineValueDone, pending && styles.timelineValuePending]}>
         {value || (pending ? 'Pending' : 'Not recorded')}
       </Text>
+    </View>
+  </View>
+);
+
+// ── Activity status-history timeline row ──────────────────────────────────────
+// Used in the "Status history" card on the order detail screen.
+// Shows status badge, timestamp, author and remarks as separate lines with a
+// vertical connector between rows so it reads as a proper timeline.
+const ActivityTimelineRow = ({ status, at, by, remarks, done, highlight, isLast }) => (
+  <View style={styles.activityRow}>
+    {/* Left column: icon + vertical connector */}
+    <View style={styles.activityLeftCol}>
+      <View style={[
+        styles.activityMarker,
+        done && styles.activityMarkerDone,
+        highlight && styles.activityMarkerHighlight,
+      ]}>
+        <Icon
+          color={highlight ? colors.white : done ? colors.success : colors.primary}
+          name={highlight ? 'check-circle' : done ? 'check' : 'circle-medium'}
+          size={16}
+        />
+      </View>
+      {!isLast && <View style={styles.activityConnector} />}
+    </View>
+
+    {/* Right column: badge + meta + remarks */}
+    <View style={[styles.activityContent, isLast && styles.activityContentLast]}>
+      <View style={[
+        styles.activityBadge,
+        highlight && styles.activityBadgeHighlight,
+        done && !highlight && styles.activityBadgeDone,
+      ]}>
+        <Text style={[
+          styles.activityBadgeText,
+          highlight && styles.activityBadgeTextHighlight,
+          done && !highlight && styles.activityBadgeTextDone,
+        ]}>
+          {status}
+        </Text>
+      </View>
+      {at ? (
+        <Text style={styles.activityMeta}>
+          {at}{by ? <Text style={styles.activityAuthor}> · {by}</Text> : null}
+        </Text>
+      ) : null}
+      {remarks ? (
+        <Text style={styles.activityRemarks}>{remarks}</Text>
+      ) : null}
     </View>
   </View>
 );
@@ -2264,11 +2826,104 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.bold,
   },
   statusStepLabelDone: { color: colors.navy, fontWeight: typography.weights.black },
+  statusStepLabelPending: { color: colors.textMuted, fontWeight: typography.weights.medium },
   statusStepCurrent: {
     color: colors.primary,
     fontSize: typography.sizes.footnote,
     fontWeight: typography.weights.extraBold,
     marginTop: 2,
+  },
+  // new unified timeline styles
+  statusStepTextColSpaced: { paddingBottom: spacing.lg },
+  statusStepRowTop: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  statusActivePill: {
+    backgroundColor: colors.primarySoft,
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  statusActivePillText: {
+    color: colors.primary,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.4,
+  },
+  statusStepMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    lineHeight: 18,
+    marginTop: 3,
+  },
+  statusStepMetaBy: {
+    color: colors.navy,
+    fontWeight: typography.weights.bold,
+  },
+  statusStepPending: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontStyle: 'italic',
+    marginTop: 3,
+  },
+  // ── Cancelled state ──
+  cancelledCard: {
+    backgroundColor: colors.dangerSoft,
+    borderColor: colors.danger,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginTop: spacing.md,
+    padding: spacing.md,
+  },
+  cancelledIconRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  cancelledIconWrap: {
+    marginTop: 2,
+  },
+  cancelledTextCol: {
+    flex: 1,
+  },
+  cancelledTitle: {
+    color: colors.danger,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.black,
+  },
+  cancelledMeta: {
+    color: colors.danger,
+    fontSize: typography.sizes.caption,
+    marginTop: 3,
+    opacity: 0.85,
+  },
+  cancelledBy: {
+    fontWeight: typography.weights.bold,
+  },
+  cancelledRemarks: {
+    color: colors.danger,
+    fontSize: typography.sizes.label,
+    lineHeight: typography.lineHeights.body,
+    marginTop: 4,
+    opacity: 0.9,
+  },
+  cancelledPrior: {
+    alignItems: 'center',
+    borderTopColor: colors.danger,
+    borderTopWidth: 0.5,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    opacity: 0.7,
+    paddingTop: spacing.sm,
+  },
+  cancelledPriorText: {
+    color: colors.danger,
+    fontSize: typography.sizes.caption,
+    flex: 1,
   },
   statusReadonlyNote: {
     alignItems: 'flex-start',
@@ -2540,10 +3195,185 @@ const styles = StyleSheet.create({
   timelineValueDone: { color: colors.success },
   timelineValuePending: { color: colors.textMuted, fontStyle: 'italic' },
 
+  // ── ActivityTimelineRow styles ──
+  activityRow: { flexDirection: 'row', alignItems: 'stretch' },
+  activityLeftCol: { alignItems: 'center', marginRight: spacing.md, width: 32 },
+  activityMarker: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.round,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+    zIndex: 1,
+  },
+  activityMarkerDone: { backgroundColor: colors.successSoft },
+  activityMarkerHighlight: { backgroundColor: colors.success },
+  activityConnector: {
+    backgroundColor: colors.divider,
+    flex: 1,
+    marginVertical: 2,
+    width: 2,
+  },
+  activityContent: {
+    borderBottomColor: colors.divider,
+    borderBottomWidth: 1,
+    flex: 1,
+    paddingBottom: spacing.md,
+    paddingTop: spacing.xs,
+  },
+  activityContentLast: { borderBottomWidth: 0 },
+  activityBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.sm,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  activityBadgeDone: { backgroundColor: colors.successSoft },
+  activityBadgeHighlight: { backgroundColor: colors.success },
+  activityBadgeText: {
+    color: colors.primary,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  activityBadgeTextDone: { color: colors.success },
+  activityBadgeTextHighlight: { color: colors.white },
+  activityMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginBottom: 1,
+  },
+  activityAuthor: {
+    color: colors.navy,
+    fontWeight: typography.weights.bold,
+  },
+  activityRemarks: {
+    color: colors.text,
+    fontSize: typography.sizes.label,
+    lineHeight: typography.lineHeights.body,
+    marginTop: 2,
+  },
+
   // ── Enhanced delivery display ──
   deliverySuccessBanner: { marginHorizontal: spacing.lg, marginTop: spacing.lg },
   dispatchDetailHeroDelivered: { backgroundColor: colors.successSoft, borderColor: colors.success, borderWidth: 1 },
   bigTruckIconDelivered: { backgroundColor: colors.success },
+  // ── DispatchDetailScreen new styles ──
+  ddHero: { marginTop: spacing.lg },
+  ddHeroTop: { alignItems: 'center', flexDirection: 'row', gap: spacing.md },
+  ddHeroIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.navySoft,
+    borderRadius: radius.round,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  ddHeroIconDone: { backgroundColor: colors.successSoft },
+  ddHeroCode: {
+    color: colors.navy,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.black,
+  },
+  ddHeroOrderRef: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  ddDivider: {
+    backgroundColor: colors.divider,
+    height: 1,
+    marginVertical: spacing.md,
+  },
+  ddInfoGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  ddInfoItem: {
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    flex: 1,
+    minWidth: '45%',
+    padding: spacing.sm,
+  },
+  ddInfoLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.5,
+    marginBottom: 3,
+  },
+  ddInfoValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.bold,
+  },
+  ddInfoUnit: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.medium,
+  },
+  ddDatesGrid: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  ddDateItem: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    flex: 1,
+    gap: spacing.xs,
+    padding: spacing.sm,
+  },
+  ddDateLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.4,
+  },
+  ddDateValue: {
+    color: colors.text,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.bold,
+    textAlign: 'center',
+  },
+  ddDateValueDone: { color: colors.success },
+  ddTransportHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: spacing.md },
+  ddDriverRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.md, marginBottom: spacing.md },
+  ddTransportGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  ddTransportChip: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minWidth: '45%',
+    padding: spacing.sm,
+  },
+  ddChipLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.4,
+  },
+  ddChipValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.bold,
+    marginTop: 1,
+  },
   routeChipDelivered: { backgroundColor: colors.successSoft, borderColor: colors.success, borderWidth: 1 },
   
   deliverySummaryBox: {
@@ -2780,6 +3610,114 @@ const styles = StyleSheet.create({
   paidAmount: { color: colors.success, flexShrink: 1, fontSize: typography.sizes.label, fontWeight: typography.weights.black, maxWidth: '32%' },
   paidAmountPending: { color: colors.warning },
   linkedDispatchButton: { marginHorizontal: spacing.lg, marginTop: spacing.md },
+  // ── Payment History timeline ──
+  payHistoryRow: { flexDirection: 'row', alignItems: 'stretch' },
+  payHistoryLeftCol: { alignItems: 'center', marginRight: spacing.md, width: 32 },
+  payHistoryDot: {
+    alignItems: 'center',
+    backgroundColor: colors.successSoft,
+    borderRadius: radius.round,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+    zIndex: 1,
+  },
+  payHistoryDotDone:  { backgroundColor: colors.successSoft },
+  payHistoryDotLocal: { backgroundColor: colors.warningSoft },
+  payHistoryConnector: {
+    backgroundColor: colors.divider,
+    flex: 1,
+    marginVertical: 2,
+    width: 2,
+  },
+  payHistoryContent: {
+    flex: 1,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.sm,
+  },
+  payHistoryContentSpaced: { paddingBottom: spacing.md },
+  payHistoryTopRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: 3,
+  },
+  payHistoryAmount: {
+    color: colors.navy,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.black,
+    flex: 1,
+  },
+  payHistoryBadge: {
+    backgroundColor: colors.successSoft,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  payHistoryBadgeLocal:   { backgroundColor: colors.warningSoft },
+  payHistoryBadgePending: { backgroundColor: colors.surfaceSubtle },
+  payHistoryBadgeText: {
+    color: colors.success,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.extraBold,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  payHistoryBadgeTextLocal:   { color: colors.warning },
+  payHistoryBadgeTextPending: { color: colors.textMuted },
+  payHistoryMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    lineHeight: 18,
+  },
+  payHistoryBy: {
+    color: colors.navy,
+    fontWeight: typography.weights.bold,
+  },
+  payHistoryRef: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  payHistoryNote: {
+    color: colors.text,
+    fontSize: typography.sizes.caption,
+    lineHeight: 18,
+    marginTop: 2,
+  },
+  payHistoryEmpty: {
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xl,
+  },
+  payHistoryEmptyText: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.label,
+    textAlign: 'center',
+  },
+  payHistoryFooter: {
+    borderTopColor: colors.divider,
+    borderTopWidth: 1,
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+  },
+  payHistoryFooterRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  payHistoryFooterLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.bold,
+  },
+  payHistoryFooterValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.black,
+  },
   payCard: { marginTop: spacing.lg },
   payHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: spacing.md },
   payHeaderIcon: {
@@ -3053,5 +3991,378 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.bold,
     marginTop: spacing.xs,
     textAlign: 'right',
+  },
+
+  // ── OrderDetailScreen — new styles ──────────────────────────
+  loadingRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+  },
+
+  // Assignment chip inside order hero
+  assignmentChip: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    padding: spacing.md,
+  },
+  assignmentChipName: {
+    color: colors.navy,
+    flexShrink: 1,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.black,
+  },
+  assignmentChipDate: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+
+  // Payment summary 3-box grid
+  paymentSummaryGrid: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  paymentSummaryBox: {
+    borderRadius: radius.md,
+    flex: 1,
+    padding: spacing.md,
+  },
+  paymentSummaryLabel: {
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.black,
+    letterSpacing: 0.5,
+  },
+  paymentSummaryValue: {
+    fontSize: typography.sizes.subtitle,
+    fontWeight: typography.weights.black,
+    marginTop: spacing.xs,
+  },
+  paymentSummaryHint: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  paidFullBadge: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+  },
+  paidFullText: {
+    color: colors.success,
+    fontSize: typography.sizes.footnote,
+    fontWeight: typography.weights.extraBold,
+  },
+  partialPayBadge: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+  },
+  partialPayText: {
+    color: colors.warning,
+    flex: 1,
+    fontSize: typography.sizes.footnote,
+    fontWeight: typography.weights.bold,
+  },
+
+  // Dispatch card inside OrderDetailScreen
+  dispatchCardIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  dispatchMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  dispatchInfoGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  dispatchInfoItem: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.sm,
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+  },
+  dispatchInfoText: {
+    color: colors.navy,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+  },
+  dispatchDates: {
+    borderTopColor: colors.divider,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+  },
+  dispatchDateItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  dispatchDateLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+    letterSpacing: 0.3,
+  },
+  dispatchDateValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.footnote,
+    fontWeight: typography.weights.extraBold,
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  dispatchNotes: {
+    alignItems: 'flex-start',
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.sm,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    padding: spacing.sm,
+  },
+  dispatchNotesText: {
+    color: colors.text,
+    flex: 1,
+    fontSize: typography.sizes.caption,
+    lineHeight: 17,
+  },
+  dispatchViewMore: {
+    alignItems: 'center',
+    borderTopColor: colors.divider,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    justifyContent: 'flex-end',
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+  },
+  dispatchViewMoreText: {
+    color: colors.primary,
+    fontSize: typography.sizes.footnote,
+    fontWeight: typography.weights.black,
+  },
+  odDispatchIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    height: 36,
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+    width: 36,
+  },
+
+  // Invoice card inside OrderDetailScreen
+  odInvoiceCard: {
+    marginBottom: spacing.md,
+    padding: spacing.lg,
+  },
+  invoiceIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.navySoft,
+    borderRadius: radius.md,
+    height: 36,
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+    width: 36,
+  },
+  odInvoiceId: {
+    color: colors.navy,
+    flexShrink: 1,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.black,
+  },
+  invoiceMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  invoiceAmountRow: {
+    borderTopColor: colors.divider,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+  },
+  invoiceAmountItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  invoiceAmountLabel: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+    letterSpacing: 0.3,
+  },
+  invoiceAmountValue: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.black,
+    marginTop: 3,
+  },
+  paymentHistoryBox: {
+    backgroundColor: colors.surfaceSubtle,
+    borderRadius: radius.md,
+    marginTop: spacing.md,
+    padding: spacing.md,
+  },
+  paymentHistoryTitle: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.black,
+    letterSpacing: 0.4,
+    marginBottom: spacing.sm,
+  },
+  paymentHistoryRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: 4,
+  },
+  paymentHistoryText: {
+    color: colors.text,
+    flex: 1,
+    fontSize: typography.sizes.caption,
+    lineHeight: 17,
+  },
+  paymentHistoryItem: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    marginTop: spacing.xs,
+    padding: spacing.sm,
+  },
+  paymentHistoryItemHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  paymentHistorySeqBadge: {
+    backgroundColor: colors.primarySoft,
+    borderRadius: 20,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  paymentHistorySeqText: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: typography.weights.black,
+  },
+  paymentHistoryAmount: {
+    color: colors.text,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.black,
+  },
+  paymentHistoryStatus: {
+    fontSize: 11,
+    fontWeight: typography.weights.bold,
+  },
+  paymentHistoryMetaLine: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 4,
+  },
+  paymentHistoryBalRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 4,
+  },
+  paymentHistoryBy: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  paymentHistoryBal: {
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: typography.weights.bold,
+  },
+  payProgressRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: 6,
+  },
+  payProgressTrack: {
+    backgroundColor: colors.divider,
+    borderRadius: 6,
+    flex: 1,
+    height: 6,
+    overflow: 'hidden',
+  },
+  payProgressFill: {
+    borderRadius: 6,
+    height: '100%',
+  },
+  payProgressLabel: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: typography.weights.bold,
+  },
+  invoiceDueRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  invoiceDueText: {
+    color: colors.warning,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.bold,
+  },
+
+  // Collect action banner at bottom
+  collectActionRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  collectActionIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.md,
+    height: 48,
+    justifyContent: 'center',
+    width: 48,
+  },
+  collectActionTitle: {
+    color: colors.navy,
+    fontSize: typography.sizes.label,
+    fontWeight: typography.weights.black,
+  },
+  collectActionSub: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  collectActionBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.round,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  collectActionBtnText: {
+    color: colors.onNavy,
+    fontSize: typography.sizes.footnote,
+    fontWeight: typography.weights.black,
   },
 });

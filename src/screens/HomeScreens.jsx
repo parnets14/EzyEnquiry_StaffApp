@@ -3,7 +3,6 @@ import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useApp, useRefresh } from '../AppContext';
 import {
-  ActionTile,
   AppHeader,
   EmptyState,
   MetricCard,
@@ -56,45 +55,21 @@ export const DashboardScreen = ({ navigation }) => {
     unreadCount,
   } = useApp();
   const { refreshing, onRefresh } = useRefresh();
-  
-  // Debug logging for dashboard
-  console.log('DashboardScreen - Data loaded:', {
-    customers: customers.length,
-    quotations: quotations.length,
-    orders: orders.length,
-    invoices: invoices.length,
-    collections: collections.length,
-  });
-  
-  // Broaden status matching to catch more quotations
+
+  // ── Counts ──────────────────────────────────────────────────
   const pendingQuotations = quotations.filter(item => {
     const status = item.status?.toUpperCase() || '';
     return ['PENDING', 'RESPONDED', 'NEGOTIATION', 'DRAFT', 'SENT'].includes(status);
   }).length;
-  
+
   const activeOrders = orders.filter(order => {
     const status = order.status?.toUpperCase() || '';
     return !['DELIVERED', 'CANCELLED'].includes(status);
   }).length;
-  
-  const holdOrders = orders.filter(order => {
-    const status = order.status?.toUpperCase() || '';
-    return status === 'HOLD';
-  }).length;
-  
-  const pendingInvoices = invoices.filter(invoice => invoice.balance > 0).length;
-  
-  const pendingCollections = collections.filter(
-    collection => collection.status !== 'ACCOUNT_VERIFIED',
-  ).length;
 
-  console.log('DashboardScreen - Metrics:', {
-    pendingQuotations,
-    activeOrders,
-    holdOrders,
-    pendingInvoices,
-    pendingCollections,
-  });
+  const holdOrders = orders.filter(order => (order.status?.toUpperCase() || '') === 'HOLD').length;
+  const pendingInvoices = invoices.filter(invoice => invoice.balance > 0).length;
+  const pendingCollections = collections.filter(c => c.status !== 'ACCOUNT_VERIFIED').length;
 
   return (
     <Screen refreshing={refreshing} onRefresh={onRefresh}>
@@ -118,7 +93,7 @@ export const DashboardScreen = ({ navigation }) => {
         />
         <MetricCard
           icon="file-document-outline"
-          label="Quotations"
+          label="Open quotes"
           onPress={() => navigation.navigate('Quotations')}
           tone="navy"
           value={pendingQuotations}
@@ -138,13 +113,13 @@ export const DashboardScreen = ({ navigation }) => {
         />
         <MetricCard
           icon="currency-inr"
-          label="Invoices"
+          label="Unpaid invoices"
           onPress={() => navigation.navigate('Invoices')}
           value={pendingInvoices}
         />
         <MetricCard
           icon="hand-coin-outline"
-          label="Collections"
+          label="Pending collections"
           onPress={() => navigation.navigate('Collections')}
           tone="navy"
           value={pendingCollections}
@@ -270,34 +245,6 @@ export const DashboardScreen = ({ navigation }) => {
         />
       )}
 
-      {/* ── Recent Customers ── */}
-      <SectionHeader
-        actionLabel="View all"
-        onAction={() => navigation.navigate('Customers')}
-        title="Recent customers"
-      />
-      <View style={styles.sectionBody}>
-        {customers.length ? (
-          customers.slice(0, 2).map(customer => (
-            <ActionTile
-              icon="account-outline"
-              key={customer.id}
-              onPress={() =>
-                navigation.navigate('CustomerDetail', { id: customer.id })
-              }
-              subtitle={`${customer.city} · ${formatCurrency(customer.outstanding)} due`}
-              title={customer.name}
-            />
-          ))
-        ) : (
-          <EmptyState
-            compact
-            icon="account-group-outline"
-            message="Assigned customers will appear here."
-            title="No customers yet"
-          />
-        )}
-      </View>
     </Screen>
   );
 };

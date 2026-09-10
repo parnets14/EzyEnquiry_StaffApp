@@ -27,7 +27,6 @@ import {
   SurfaceCard,
   TextField,
 } from '../components';
-import { OTP_PURPOSES } from '../constants';
 import { colors, formatCurrency, radius, shadow, spacing } from '../theme';
 
 // ─────────────────────────────────────────────────────────────────
@@ -38,28 +37,28 @@ export const CollectionsScreen = ({ navigation }) => {
   const { refreshing, onRefresh } = useRefresh();
   const [filter, setFilter] = useState('PENDING');
 
-  // Debug logging
-  console.log('CollectionsScreen - Staff ID:', staff?.id);
-  console.log('CollectionsScreen - Total collections:', collections.length);
-  
   const staffCollections = collections.filter(
-    item => item.staffId === staff.id || item.staffId === null,
+    item => item.staffId === staff.id || !item.staffId,
   );
-  
-  console.log('CollectionsScreen - Staff collections:', staffCollections.length);
-  
+
   const visible = staffCollections.filter(item => {
     if (filter === 'ALL') return true;
     if (filter === 'VERIFIED') return item.status === 'ACCOUNT_VERIFIED';
     return item.status !== 'ACCOUNT_VERIFIED';
   });
-  
-  console.log('CollectionsScreen - Visible (filtered):', visible.length, 'Filter:', filter);
-  
+
   const pendingAmount = staffCollections
     .filter(item => item.status !== 'ACCOUNT_VERIFIED')
     .reduce((sum, item) => sum + item.amount, 0);
-  const totalCollected = staffCollections.reduce((s, i) => s + i.amount, 0);
+  const totalCollected = staffCollections.reduce((acc, i) => acc + i.amount, 0);
+
+  // Status → stripe colour
+  const stripeColor = status => {
+    if (status === 'ACCOUNT_VERIFIED')  return colors.success;
+    if (status === 'ACCOUNT_VERIFICATION') return colors.primary;
+    if (status === 'HANDOVER_PENDING')  return colors.warning;
+    return colors.navy;   // COLLECTED
+  };
 
   return (
     <Screen refreshing={refreshing} onRefresh={onRefresh}>
@@ -116,12 +115,11 @@ export const CollectionsScreen = ({ navigation }) => {
             accessibilityHint="Opens collection details"
             accessibilityLabel={`${collection.id}, ${collection.customerName}, ${formatCurrency(collection.amount)}, status ${collection.status.replace(/_/g, ' ')}`}
             accessibilityRole="button"
-            onPress={() =>
-              navigation.navigate('CollectionDetail', { id: collection.id })
-            }
+            onPress={() => navigation.navigate('CollectionDetail', { id: collection.id, invoiceId: collection.invoiceId })}
             style={({ pressed }) => [s.card, pressed && s.cardPressed]}>
-            <View style={s.cardStripe} />
+            <View style={[s.cardStripe, { backgroundColor: stripeColor(collection.status) }]} />
             <View style={s.cardBody}>
+              {/* Top: id + status pill */}
               <View style={s.cardTopRow}>
                 <View style={s.flex1Min}>
                   <Text style={s.cardId}>{collection.id}</Text>
@@ -129,18 +127,15 @@ export const CollectionsScreen = ({ navigation }) => {
                 </View>
                 <StatusPill status={collection.status} />
               </View>
+              {/* Mid: invoice + mode + amount */}
               <View style={s.cardMid}>
                 <View style={s.flex1Min}>
-                  <Row icon="text-box-outline" text={collection.invoiceId} />
-                  <Row
-                    icon="credit-card-outline"
-                    text={`${collection.mode} · ${collection.paymentId}`}
-                  />
+                  <Row icon="text-box-outline"   text={collection.invoiceId} />
+                  <Row icon="credit-card-outline" text={collection.mode} />
                 </View>
-                <Text style={s.cardAmount}>
-                  {formatCurrency(collection.amount)}
-                </Text>
+                <Text style={s.cardAmount}>{formatCurrency(collection.amount)}</Text>
               </View>
+              {/* Footer: staff name + timestamp */}
               <View style={s.cardFooter}>
                 <Text style={s.cardFooterText}>{collection.staffName}</Text>
                 <Text style={s.cardFooterText}>{collection.collectedAt}</Text>
@@ -175,21 +170,33 @@ export const CollectionFormScreen = ({ navigation, route }) => {
     return <MissingRecord navigation={navigation} title="Invoice not found" />;
   }
 
-  const submit = () => {
-    const result = recordCollection({
-      invoiceId: invoice.id,
-      amount: Number(amount),
-      mode,
-      reference,
-    });
-    if (!result.success) {
-      setError(result.message);
-      return;
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (submitting) return;
+    setError('');
+    setSubmitting(true);
+    try {
+      const result = await recordCollection({
+        invoiceId: invoice.id,
+        amount: Number(amount),
+        mode,
+        reference,
+      });
+      if (!result || !result.success) {
+        setError((result && result.message) || 'Could not record collection. Please try again.');
+        return;
+      }
+      navigation.replace('CollectionDetail', {
+        id: result.collection.id,
+        invoiceId: result.collection.invoiceId,
+        created: true,
+      });
+    } catch (err) {
+      setError(err?.message || 'Could not record collection. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
-    navigation.replace('CollectionDetail', {
-      id: result.collection.id,
-      created: true,
-    });
   };
 
   return (
@@ -198,7 +205,8 @@ export const CollectionFormScreen = ({ navigation, route }) => {
         <PrimaryButton
           icon="cash-plus"
           onPress={submit}
-          title="Record customer collection"
+          loading={submitting}
+          title={submitting ? 'Recording…' : 'Record customer collection'}
         />
       }
       footerStyle={s.formFooter}
@@ -270,50 +278,65 @@ export const CollectionFormScreen = ({ navigation, route }) => {
 // COLLECTION DETAIL
 // ─────────────────────────────────────────────────────────────────
 export const CollectionDetailScreen = ({ navigation, route }) => {
-  const { collections, invoices, otpChallenge, payments } = useApp();
-  const collection = collections.find(item => item.id === route.params?.id);
+  const { collections, invoices, payments } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
+  // Match by the exact id first. After a pull-to-refresh the collections are
+  // re-seeded from the backend with new ids (COL-{invId}-{idx}), so fall back to
+  // matching by the invoice this collection belongs to (latest entry for it).
+  const routeId   = route.params?.id;
+  const routeInv  = route.params?.invoiceId;
+  let collection  = collections.find(item => item.id === routeId);
+  if (!collection && routeInv) {
+    const forInvoice = collections.filter(
+      c => c.invoiceId === routeInv || c._invoiceId === routeInv,
+    );
+    collection = forInvoice[0]; // newest first (collections are prepended/sorted)
+  }
 
   if (!collection) {
     return <MissingRecord navigation={navigation} title="Collection not found" />;
   }
 
-  const invoice = invoices.find(item => item.id === collection.invoiceId);
-  const payment = payments.find(item => item.id === collection.paymentId);
+  const invoice  = invoices.find(item => item.id === collection.invoiceId);
+  const payment  = payments.find(item => item.id === collection.paymentId);
   const isVerifying = collection.status === 'ACCOUNT_VERIFICATION';
   const isVerified  = collection.status === 'ACCOUNT_VERIFIED';
-  // Whether an active OTP challenge exists for this collection (no static code —
-  // the accountant simply reads this screen as confirmation).
-  const hasActiveChallenge =
-    isVerifying &&
-    otpChallenge?.purpose === OTP_PURPOSES.PAYMENT_COLLECTION &&
-    otpChallenge?.collectionId === collection.id;
+
+  // Hero icon + colour based on status
+  const heroColor = isVerified ? colors.success : isVerifying ? colors.primary : colors.warning;
+  const heroIcon  = isVerified ? 'check-decagram' : isVerifying ? 'shield-key-outline' : 'cash-clock';
+  const heroBg    = isVerified ? colors.successSoft : isVerifying ? colors.primarySoft : colors.warningSoft;
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
       <AppHeader
         navigation={navigation}
         showBack
         showNotifications={false}
-        subtitle={`Invoice ${collection.invoiceId}`}
+        subtitle={`Invoice · ${collection.invoiceId}`}
         title={collection.id}
       />
 
+      {/* ── Success banner on creation ── */}
       {route.params?.created ? (
         <NoticeBanner
-          message="Payment recorded. Admin/Accounts will verify whether the amount was received."
+          icon="check-circle-outline"
+          message="Collection recorded successfully. Accounts will verify the amount."
           style={s.detailNotice}
+          title="Payment recorded"
           tone="success"
         />
       ) : null}
 
+      {/* ── Hero card ── */}
       <View style={s.detailHero}>
         <View style={s.detailHeroTop}>
-          <View style={s.detailHeroBadge}>
-            <Icon color={colors.primary} name="cash-multiple" size={20} />
+          <View style={[s.detailHeroBadge, { backgroundColor: heroBg }]}>
+            <Icon color={heroColor} name={heroIcon} size={22} />
           </View>
           <View style={s.detailHeroTextWrap}>
-            <Text style={s.detailHeroLabel}>COLLECTION AMOUNT</Text>
-            <Text numberOfLines={1} style={s.detailHeroAmount}>
+            <Text style={s.detailHeroLabel}>AMOUNT COLLECTED</Text>
+            <Text numberOfLines={1} style={[s.detailHeroAmount, { color: heroColor }]}>
               {formatCurrency(collection.amount)}
             </Text>
           </View>
@@ -322,98 +345,122 @@ export const CollectionDetailScreen = ({ navigation, route }) => {
         <View style={s.detailHeroFooter}>
           <View style={s.detailHeroCustomerAvatar}>
             <Text style={s.detailHeroCustomerAvatarText}>
-              {(collection.customerName || '?').charAt(0)}
+              {(collection.customerName || '?').charAt(0).toUpperCase()}
             </Text>
           </View>
           <View style={s.flex1Min}>
             <Text numberOfLines={1} style={s.detailHeroCustomer}>
               {collection.customerName}
             </Text>
-            <Text style={s.detailHeroCollId}>{collection.id}</Text>
+            <Text style={s.detailHeroCollId}>
+              {collection.mode}{collection.reference ? ` · ${collection.reference}` : ''}
+            </Text>
           </View>
         </View>
       </View>
 
+      {/* ── Collection details ── */}
       <SurfaceCard style={s.surfaceCard}>
-        <Text accessibilityRole="header" style={s.sectionTitle}>
-          Collection details
-        </Text>
-        <InfoRow label="Payment" value={collection.paymentId} />
-        <InfoRow label="Invoice" value={collection.invoiceId} />
-        <InfoRow label="Sales order" value={collection.orderId} />
-        <InfoRow label="Mode" value={collection.mode} />
-        <InfoRow label="Reference" value={collection.reference} />
-        <InfoRow label="Collected by" value={collection.staffName} />
-        <InfoRow label="Collected at" value={collection.collectedAt} />
+        <Text accessibilityRole="header" style={s.sectionTitle}>Collection details</Text>
+        <InfoRow icon="text-box-outline"      label="Invoice"      value={collection.invoiceId} />
+        <InfoRow icon="clipboard-text-outline" label="Sales order"  value={collection.orderId} />
+        <InfoRow icon="credit-card-outline"   label="Payment mode" value={collection.mode} />
+        {collection.reference ? (
+          <InfoRow icon="receipt-outline" label="Reference" value={collection.reference} />
+        ) : null}
+        <InfoRow icon="account-outline"  label="Collected by" value={collection.staffName} />
+        <InfoRow icon="clock-outline"    label="Collected at" value={collection.collectedAt} />
+        {collection.verifiedAt ? (
+          <InfoRow icon="check-decagram-outline" label="Verified at" value={collection.verifiedAt} />
+        ) : null}
       </SurfaceCard>
 
+      {/* ── Invoice balance strip ── */}
+      {invoice ? (
+        <View style={s.balanceStrip}>
+          <View style={s.balanceStripItem}>
+            <Text style={s.balanceStripLabel}>INVOICE TOTAL</Text>
+            <Text style={s.balanceStripValue}>{formatCurrency(invoice.total)}</Text>
+          </View>
+          <View style={s.balanceStripDivider} />
+          <View style={s.balanceStripItem}>
+            <Text style={s.balanceStripLabel}>PAID SO FAR</Text>
+            <Text style={[s.balanceStripValue, { color: colors.success }]}>
+              {formatCurrency(invoice.paidAmount)}
+            </Text>
+          </View>
+          <View style={s.balanceStripDivider} />
+          <View style={s.balanceStripItem}>
+            <Text style={s.balanceStripLabel}>BALANCE DUE</Text>
+            <Text style={[s.balanceStripValue, { color: invoice.balance > 0 ? colors.danger : colors.success }]}>
+              {formatCurrency(invoice.balance)}
+            </Text>
+          </View>
+        </View>
+      ) : null}
+
+      {/* ── Verification timeline ── */}
       <SurfaceCard style={s.surfaceCard}>
-        <Text accessibilityRole="header" style={s.sectionTitle}>
-          Verification timeline
-        </Text>
+        <Text accessibilityRole="header" style={s.sectionTitle}>Verification status</Text>
         <TimelineStep
           active
           complete
-          label="Payment recorded by staff"
+          label="Collected by staff"
           value={collection.collectedAt}
         />
         <TimelineStep
           active={isVerifying || isVerified}
           complete={isVerified}
-          label="Admin / Accounts verifying"
+          label="Accounts verification"
           value={
             isVerified
-              ? 'Verification requested'
+              ? `Verified · ${collection.verifiedAt || ''}`
               : isVerifying
-                ? 'In progress — share OTP with accountant'
-                : 'Waiting for Admin to verify'
+              ? 'In progress — OTP shared with accountant'
+              : 'Waiting for Admin/Accounts'
           }
         />
         <TimelineStep
           active={isVerified}
           complete={isVerified}
-          label="Amount verified"
-          value={collection.verifiedAt || 'Pending verification'}
+          label="Ledger updated"
+          value={isVerified ? 'Amount confirmed in accounts' : 'Pending verification'}
         />
       </SurfaceCard>
 
-      {invoice ? (
-        <View style={s.balanceStrip}>
-          <View style={s.balanceStripItem}>
-            <Text style={s.balanceStripLabel}>INVOICE BALANCE</Text>
-            <Text style={s.balanceStripValue}>
-              {formatCurrency(invoice.balance)}
-            </Text>
-          </View>
-          <View style={s.balanceStripDivider} />
-          <View style={s.balanceStripItem}>
-            <Text style={s.balanceStripLabel}>PAYMENT STATUS</Text>
-            <Text style={s.balanceStripStatus}>{payment?.status}</Text>
-          </View>
-        </View>
-      ) : null}
-
-      {hasActiveChallenge ? (
+      {/* ── OTP card: admin requested verification. Staff reads the OTP
+             out to the accountant, who enters it in the admin panel. ── */}
+      {isVerifying ? (
         <View style={s.otpShareCard}>
           <View style={s.otpShareHeader}>
-            <Icon color={colors.primary} name="shield-key-outline" size={20} />
-            <Text style={s.otpShareTitle}>Accounts verification in progress</Text>
+            <Icon color={colors.primary} name="shield-key-outline" size={22} />
+            <Text style={s.otpShareTitle}>Share this OTP with the accountant</Text>
           </View>
           <Text style={s.otpShareSub}>
-            Show this screen to the accountant as confirmation that{' '}
-            <Text style={{ fontWeight: '800' }}>{formatCurrency(collection.amount)}</Text>{' '}
-            was received for {collection.invoiceId}. The accountant will enter the
-            6-digit code sent to your registered mobile to complete verification.
+            The accountant requested verification for this collection.
+            Read the code below to them — they will enter it to confirm the amount.
           </Text>
-          <View style={s.otpShareNote}>
-            <Icon color={colors.textMuted} name="information-outline" size={14} />
-            <Text style={s.otpShareNoteText}>
-              Keep this screen open until the accountant confirms the code.
-            </Text>
-          </View>
+
+          {collection.otpCode ? (
+            <View style={s.otpShareCodeRow}>
+              {String(collection.otpCode).split('').map((digit, i) => (
+                <View key={i} style={s.otpShareDigitBox}>
+                  <Text style={s.otpShareDigit}>{digit}</Text>
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={[s.otpShareCodeRow, { justifyContent: 'flex-start' }]}>
+              <Icon color={colors.textMuted} name="timer-sand" size={16} />
+              <Text style={[s.otpShareSub, { marginTop: 0, marginLeft: 8 }]}>
+                Waiting for the code… pull to refresh.
+              </Text>
+            </View>
+          )}
         </View>
       ) : null}
 
+      {/* ── Status banners ── */}
       {isVerified ? (
         <NoticeBanner
           icon="check-decagram-outline"
@@ -422,14 +469,24 @@ export const CollectionDetailScreen = ({ navigation, route }) => {
           title="Payment verified"
           tone="success"
         />
-      ) : !verificationOtp ? (
+      ) : !isVerifying ? (
         <View style={s.awaitNote}>
           <Icon color={colors.textMuted} name="clock-outline" size={16} />
           <Text style={s.awaitNoteText}>
-            Waiting for Admin/Accounts to verify this payment. No action is
-            needed from you here.
+            Waiting for Admin/Accounts to verify this payment. You'll be prompted when they initiate verification.
           </Text>
         </View>
+      ) : null}
+
+      {/* ── Quick link to invoice ── */}
+      {invoice ? (
+        <PrimaryButton
+          icon="text-box-outline"
+          onPress={() => navigation.navigate('InvoiceDetail', { id: collection.invoiceId })}
+          style={s.actionBtn}
+          title={`Open Invoice · ${collection.invoiceId}`}
+          variant="outline"
+        />
       ) : null}
     </Screen>
   );
@@ -440,37 +497,38 @@ export const CollectionDetailScreen = ({ navigation, route }) => {
 // ─────────────────────────────────────────────────────────────────
 export const CollectionOtpScreen = ({ navigation, route }) => {
   const inputRef = useRef(null);
-  const { collections, otpChallenge, verifyCollectionOtp } = useApp();
+  const { collections, verifyCollectionOtp } = useApp();
   const collection = collections.find(item => item.id === route.params?.id);
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
+  const [verifying, setVerifying] = useState(false);
 
   if (!collection) {
     return <MissingRecord navigation={navigation} title="Collection not found" />;
   }
 
-  const verify = () => {
-    const result = verifyCollectionOtp(collection.id, otp);
+  const verify = async () => {
+    setError('');
+    setVerifying(true);
+    const result = await verifyCollectionOtp(collection.id, otp);
+    setVerifying(false);
     if (!result.success) {
       setError(result.message);
       return;
     }
     Alert.alert(
-      'Accounts handover verified',
-      `${collection.id} is now ACCOUNT VERIFIED.`,
+      'Collection verified',
+      `${collection.invoiceId} payment of ${formatCurrency(collection.amount)} is now verified.`,
       [
         {
           text: 'View collection',
-          onPress: () =>
-            navigation.popTo('CollectionDetail', { id: collection.id }),
+          onPress: () => navigation.popTo('CollectionDetail', { id: collection.id }),
         },
       ],
     );
   };
 
-  const correctPurpose =
-    otpChallenge?.purpose === OTP_PURPOSES.PAYMENT_COLLECTION &&
-    otpChallenge?.collectionId === collection.id;
+  const isOtpPending = collection.status === 'ACCOUNT_VERIFICATION';
   return (
     <SafeAreaView
       edges={['top', 'right', 'bottom', 'left']}
@@ -503,17 +561,19 @@ export const CollectionOtpScreen = ({ navigation, route }) => {
           <View style={s.otpIconCircle}>
             <Icon
               color={colors.primary}
-              name="account-cash-outline"
+              name="shield-key-outline"
               size={32}
             />
           </View>
           <Text accessibilityRole="header" style={s.otpTitle}>
-            Confirm Accounts handover
+            Verify Collection
           </Text>
           <Text style={s.otpPurpose}>
-            {OTP_PURPOSES.PAYMENT_COLLECTION}
+            Admin has sent a 6-digit OTP to your registered mobile
           </Text>
-          <Text style={s.otpCollId}>{collection.id}</Text>
+          <Text style={s.otpCollId}>
+            {collection.invoiceId} · {formatCurrency(collection.amount)}
+          </Text>
 
           <Pressable
             accessibilityHint="Opens the number keyboard to enter the code"
@@ -566,11 +626,11 @@ export const CollectionOtpScreen = ({ navigation, route }) => {
           ) : null}
 
           <PrimaryButton
-            disabled={otp.length !== 6 || !correctPurpose}
+            disabled={otp.length !== 6 || verifying}
             icon="check-decagram"
             onPress={verify}
             style={s.otpVerifyBtn}
-            title="Verify Accounts handover"
+            title={verifying ? 'Verifying…' : 'Verify Collection'}
           />
         </ScrollView>
       </KeyboardAvoidingView>

@@ -52,6 +52,35 @@ const formatQuotationDate = date =>
     year: 'numeric',
   });
 
+// Short date for activity rows / "last" summaries. Returns '' for missing dates.
+const formatShortDate = value => {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
+// "3 days ago" style relative label used alongside the last-activity date.
+const formatRelativeDate = value => {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const diffMs = Date.now() - d.getTime();
+  const day = 24 * 60 * 60 * 1000;
+  const days = Math.floor(diffMs / day);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} month${months > 1 ? 's' : ''} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years > 1 ? 's' : ''} ago`;
+};
+
 export const CustomersScreen = ({ navigation }) => {
   const { customers, unreadCount } = useApp();
   const { refreshing, onRefresh } = useRefresh();
@@ -415,10 +444,24 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
     (String(item.customerId) === String(customer.id) ||
       String(item.customerId) === String(customer._id));
 
-  const localOrders   = orders.filter(matchCustomer);
-  const localQuotes   = quotations.filter(matchCustomer);
+  // Newest-first sort helper for the local fallback (context data isn't
+  // guaranteed to be ordered). Uses the record's own date field.
+  const byDateDesc = pick => (a, b) =>
+    new Date(pick(b) || 0) - new Date(pick(a) || 0);
+
+  const localOrders = orders
+    .filter(matchCustomer)
+    .map(o => ({ ...o, date: o.date || o.orderDate || o.createdAt || null }))
+    .sort(byDateDesc(o => o.date));
+  const localQuotes = quotations
+    .filter(matchCustomer)
+    .map(q => ({ ...q, date: q.date || q.quotationDate || q.createdAt || null }))
+    .sort(byDateDesc(q => q.date));
   const localInvoices = invoices.filter(matchCustomer);
-  const localPayments = payments.filter(matchCustomer);
+  const localPayments = payments
+    .filter(matchCustomer)
+    .map(p => ({ ...p, date: p.date || p._date || null }))
+    .sort(byDateDesc(p => p.date));
 
   // Full history fetched from the backend by customer_id (includes OLD records
   // and records created by the retailer/admin — not just this staff's own).
@@ -429,6 +472,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const customerObjId = customer?._id || customer?.id;
+  const customerMobile = customer?.mobile || '';
 
   useEffect(() => {
     let cancelled = false;
@@ -437,27 +481,34 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
     (async () => {
       setLoadingHistory(true);
       try {
+        // Match history by id AND phone — orders/quotations/invoices may be
+        // linked either way depending on how they were created.
+        const q = { customer_id: customerObjId, limit: 200 };
+        if (customerMobile) q.customer_mobile = customerMobile;
         const [oRes, qRes, iRes] = await Promise.all([
-          orderApi.list({ customer_id: customerObjId, limit: 200 }),
-          quotationApi.list({ customer_id: customerObjId, limit: 200 }),
-          invoiceApi.list({ customer_id: customerObjId, limit: 200 }),
+          orderApi.list(q),
+          quotationApi.list(q),
+          invoiceApi.list(q),
         ]);
         if (cancelled) return;
 
         if (oRes?.success) {
           const raw = oRes.data?.orders || oRes.data || [];
-          setFullOrders(raw.map(o => ({
+          const mapped = raw.map(o => ({
             id:            o.order_code || String(o._id),
             productName:   o.product_name || (o.items?.[0]?.product_name) || 'Order',
             total:         Number(o.grand_total ?? o.total ?? 0),
             status:        o.status || '',
+            date:          o.order_date || o.created_at || o.createdAt || null,
             createdByName: o.created_by_name || '',
             createdByType: o.created_by_type || '',
-          })));
+          }));
+          mapped.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+          setFullOrders(mapped);
         }
         if (qRes?.success) {
           const raw = qRes.data?.quotations || qRes.data || [];
-          setFullQuotes(raw.map(q => {
+          const mapped = raw.map(q => {
             const it = q.items?.[0] || {};
             return {
               id:            q.quotation_no || String(q._id),
@@ -466,10 +517,13 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
               unit:          it.unit || 'pcs',
               total:         Number(q.grand_total ?? q.total ?? 0),
               status:        q.status || '',
+              date:          q.quotation_date || q.created_at || q.createdAt || null,
               createdByName: q.created_by_name || '',
               createdByType: q.created_by_type || '',
             };
-          }));
+          });
+          mapped.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+          setFullQuotes(mapped);
         }
         if (iRes?.success) {
           const raw = iRes.data?.invoices || iRes.data || [];
@@ -499,7 +553,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
     })();
 
     return () => { cancelled = true; };
-  }, [customerObjId]);
+  }, [customerObjId, customerMobile]);
 
   if (!customer) {
     return <MissingRecord navigation={navigation} title="Customer not found" />;
@@ -589,6 +643,32 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
         <InfoRow icon="history" label="Last order" value={customer.lastOrder} />
       </SurfaceCard>
 
+      <SurfaceCard style={styles.detailCard}>
+        <CardHeading icon="account-plus-outline" title="Added by" />
+        <AddedByBadge type={customer.createdByType} />
+        <InfoRow
+          icon="account-outline"
+          label="Name"
+          value={customer.createdByName || 'Not recorded'}
+        />
+        <InfoRow
+          icon="phone-outline"
+          label="Mobile"
+          value={
+            customer.createdByMobile
+              ? `+91 ${customer.createdByMobile}`
+              : 'Not recorded'
+          }
+        />
+        {customer.createdAt ? (
+          <InfoRow
+            icon="calendar-blank-outline"
+            label="Added on"
+            value={customer.createdAt}
+          />
+        ) : null}
+      </SurfaceCard>
+
       <View style={styles.detailActions}>
         <PrimaryButton
           icon="file-plus-outline"
@@ -611,7 +691,15 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
 
       <SectionHeader title={`Quotations (${customerQuotes.length})`} />
       {customerQuotes.length ? (
-        customerQuotes.map(quotation => (
+        <>
+          <LastActivity
+            icon="file-document-outline"
+            label="Last quotation"
+            date={customerQuotes[0].date}
+            summary={customerQuotes[0].productName}
+            amount={formatCurrency(customerQuotes[0].total)}
+          />
+          {customerQuotes.map(quotation => (
           <ActivityCard
             accessibilityLabel={`Quotation ${quotation.id}, ${
               quotation.productName
@@ -619,6 +707,7 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
             amount={formatCurrency(quotation.total)}
             createdByName={quotation.createdByName}
             createdByType={quotation.createdByType}
+            date={quotation.date}
             id={quotation.id}
             key={quotation.id}
             name={`${quotation.productName} · ${quotation.quantity} ${quotation.unit}`}
@@ -627,7 +716,8 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
             }
             status={quotation.status}
           />
-        ))
+          ))}
+        </>
       ) : (
         <EmptyState
           compact
@@ -639,7 +729,15 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
 
       <SectionHeader title={`Orders (${customerOrders.length})`} />
       {customerOrders.length ? (
-        customerOrders.map(order => (
+        <>
+          <LastActivity
+            icon="clipboard-check-outline"
+            label="Last order"
+            date={customerOrders[0].date}
+            summary={customerOrders[0].productName}
+            amount={formatCurrency(customerOrders[0].total)}
+          />
+          {customerOrders.map(order => (
           <ActivityCard
             accessibilityLabel={`Order ${order.id}, ${
               order.productName
@@ -647,13 +745,15 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
             amount={formatCurrency(order.total)}
             createdByName={order.createdByName}
             createdByType={order.createdByType}
+            date={order.date}
             id={order.id}
             key={order.id}
             name={order.productName}
             onPress={() => navigation.navigate('OrderDetail', { id: order.id })}
             status={order.status}
           />
-        ))
+          ))}
+        </>
       ) : (
         <EmptyState
           compact
@@ -665,12 +765,21 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
 
       <SectionHeader title={`Payments & ledger (${customerPayments.length})`} />
       {customerPayments.length ? (
-        customerPayments.map(payment => (
+        <>
+          <LastActivity
+            icon="cash-multiple"
+            label="Last payment"
+            date={customerPayments[0].date}
+            summary={`${customerPayments[0].invoiceId} · ${customerPayments[0].mode}`}
+            amount={formatCurrency(customerPayments[0].amount)}
+          />
+          {customerPayments.map(payment => (
           <ActivityCard
             accessibilityLabel={`Payment ${payment.id}, invoice ${
               payment.invoiceId
             }, ${formatCurrency(payment.amount)}`}
             amount={formatCurrency(payment.amount)}
+            date={payment.date}
             id={payment.id}
             key={payment.id}
             name={`${payment.invoiceId} · ${payment.mode}`}
@@ -679,7 +788,8 @@ export const CustomerDetailScreen = ({ navigation, route }) => {
             }
             status={payment.status}
           />
-        ))
+          ))}
+        </>
       ) : (
         <EmptyState
           compact
@@ -1767,9 +1877,56 @@ const CardHeading = ({ icon, title }) => (
   </View>
 );
 
+// Small coloured badge showing the source that created the customer record:
+// Staff App, Retailer App, or Admin.
+const AddedByBadge = ({ type }) => {
+  const t = String(type || '').toLowerCase();
+  const config = t.includes('staff')
+    ? { label: 'Staff App',    icon: 'badge-account-outline', color: colors.info }
+    : t.includes('retailer')
+    ? { label: 'Retailer App', icon: 'storefront-outline',    color: colors.primary }
+    : { label: 'Admin',        icon: 'shield-account-outline', color: colors.navy };
+  return (
+    <View style={[styles.addedByBadge, { borderColor: config.color }]}>
+      <Icon color={config.color} name={config.icon} size={14} />
+      <Text style={[styles.addedByBadgeText, { color: config.color }]}>
+        {config.label}
+      </Text>
+    </View>
+  );
+};
+
+// Highlights the most recent record in a section — shows when it happened
+// (absolute + relative), what it was, and the amount.
+const LastActivity = ({ icon, label, date, summary, amount }) => {
+  const dateLabel = formatShortDate(date);
+  const relative = formatRelativeDate(date);
+  return (
+    <View style={styles.lastActivityCard}>
+      <View style={styles.lastActivityIcon}>
+        <Icon color={colors.primary} name={icon} size={18} />
+      </View>
+      <View style={styles.lastActivityBody}>
+        <Text style={styles.lastActivityLabel}>{label}</Text>
+        <Text numberOfLines={1} style={styles.lastActivitySummary}>
+          {summary || '—'}
+        </Text>
+        <Text style={styles.lastActivityMeta}>
+          {dateLabel ? dateLabel : 'Date not available'}
+          {relative ? ` · ${relative}` : ''}
+        </Text>
+      </View>
+      {amount ? (
+        <Text style={styles.lastActivityAmount}>{amount}</Text>
+      ) : null}
+    </View>
+  );
+};
+
 const ActivityCard = ({
   accessibilityLabel,
   amount,
+  date,
   id,
   name,
   onPress,
@@ -1777,6 +1934,7 @@ const ActivityCard = ({
   createdByName,
   createdByType,
 }) => {
+  const dateLabel = formatShortDate(date);
   const typeUpper = String(createdByType || '').toUpperCase();
   const isRetailer = typeUpper.includes('RETAILER');
   const roleLabel = typeUpper.includes('RETAILER') ? 'Retailer'
@@ -1812,6 +1970,18 @@ const ActivityCard = ({
             />
             <Text numberOfLines={1} style={styles.activityCreator}>
               Created by {creatorLabel}
+            </Text>
+          </View>
+        ) : null}
+        {dateLabel ? (
+          <View style={styles.activityCreatorRow}>
+            <Icon
+              color={colors.textMuted}
+              name="calendar-blank-outline"
+              size={12}
+            />
+            <Text numberOfLines={1} style={styles.activityCreator}>
+              {dateLabel}
             </Text>
           </View>
         ) : null}
@@ -2683,6 +2853,67 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
   },
   detailAction: { flexGrow: 1, flexBasis: 150, minWidth: 0 },
+  lastActivityCard: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+    marginHorizontal: spacing.lg,
+    padding: spacing.md,
+  },
+  lastActivityIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  lastActivityBody: { flex: 1, minWidth: 0 },
+  lastActivityLabel: {
+    color: colors.primary,
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.black,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  lastActivitySummary: {
+    color: colors.navy,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.bold,
+    marginTop: 2,
+  },
+  lastActivityMeta: {
+    color: colors.textMuted,
+    fontSize: typography.sizes.caption,
+    marginTop: 2,
+  },
+  lastActivityAmount: {
+    color: colors.navy,
+    fontSize: typography.sizes.body,
+    fontWeight: typography.weights.black,
+  },
+  addedByBadge: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surface,
+    borderRadius: radius.pill || radius.sm,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  addedByBadgeText: {
+    fontSize: typography.sizes.caption,
+    fontWeight: typography.weights.black,
+    letterSpacing: 0.4,
+  },
   activityCard: {
     alignItems: 'flex-start',
     backgroundColor: colors.surface,

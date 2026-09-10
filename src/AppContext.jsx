@@ -389,6 +389,11 @@ const mapApiCustomer = c => ({
   outstanding:  c.outstanding_amount || 0,
   orderCount:   c.order_count  || 0,
   lastOrder:    c.last_order_date ? fmtDate(c.last_order_date) : 'No orders yet',
+  // Who added this customer (Staff App / Retailer App / Admin) + their contact.
+  createdByType:   c.created_by_type   || 'Admin',
+  createdByName:   c.created_by_name   || '',
+  createdByMobile: c.created_by_mobile || '',
+  createdAt:       c.created_at ? fmtDate(c.created_at) : '',
 });
 
 // Quotations - Updated to handle more backend status values
@@ -966,9 +971,10 @@ export const AppProvider = ({ children }) => {
       city:            form.city.trim(),
       state:           form.state.trim(),
       pincode:         form.pincode.trim(),
-      biz_type:        'Customer',
-      created_by_type: 'Staff App',
-      created_by_name: staff?.name || '',
+      biz_type:          'Customer',
+      created_by_type:   'Staff App',
+      created_by_name:   staff?.name   || '',
+      created_by_mobile: staff?.mobile || '',
     });
     if (!res.success) return { success: false, message: res.message };
     const customer = mapApiCustomer(res.data);

@@ -456,12 +456,43 @@ const mapApiProduct = p => {
   const rate = p.dealer_price  || p.retail_price  || p.selling_price ||
                p.wholesale_rate || p.project_rate  || p.mrp || 0;
 
+  // Mirror the exact same creatorTypeOf() logic used in the admin ProductManagement page:
+  // 1. created_by_type stored on product
+  // 2. created_by.role (populated user)
+  // 3. company_id.biz_type (populated company)
+  // 4. product code prefix (RPD- = Retailer App)
+  // 5. fallback Unknown → shown as Admin
+  let createdByType;
+  const storedType   = (p.created_by_type || '');
+  const creatorRole  = String(p.created_by?.role || '').toLowerCase();
+  const companyBizType = String(p.company_id?.biz_type || '').toLowerCase();
+  const productCode  = String(p.code || '').toUpperCase();
+
+  if (storedType) {
+    createdByType = storedType;                         // exact DB value: 'Admin'|'Wholesaler'|'Retailer'
+  } else if (creatorRole.includes('retail')) {
+    createdByType = 'Retailer';
+  } else if (creatorRole.includes('whole')) {
+    createdByType = 'Wholesaler';
+  } else if (creatorRole.includes('admin')) {
+    createdByType = 'Admin';
+  } else if (companyBizType.includes('retail')) {
+    createdByType = 'Retailer';
+  } else if (companyBizType.includes('whole')) {
+    createdByType = 'Wholesaler';
+  } else if (productCode.startsWith('RPD-')) {
+    createdByType = 'Retailer';
+  } else {
+    createdByType = 'Admin';                            // same fallback as admin panel
+  }
+
   return {
     id:           String(p._id),
     _id:          String(p._id),
-    companyId:    String(p.company_id?._id || p.company_id || ''),  // product owner's company
+    companyId:    String(p.company_id?._id || p.company_id || ''),
     companyName:  p.company_id?.name || '',
-    createdByType: p.created_by_type || 'Admin',
+    createdByType,
+    createdByName: String(p.created_by?.name || '').trim(),  // populated creator name
     code:         p.code         || '',
     name:         p.name         || '',
     brand:        brandName,

@@ -1316,11 +1316,15 @@ export const QuotationFormScreen = ({ navigation, route }) => {
             <Text style={qfStyles.resultMeta} numberOfLines={1}>
               {[p.code, p.brand, p.category, p.size].filter(Boolean).join(' · ')}
             </Text>
-            {p.companyName ? (
-              <Text style={[qfStyles.resultMeta, { color: '#7C3AED', fontSize: 10 }]}>
-                {p.companyName} · {p.createdByType || 'Admin'}
-              </Text>
-            ) : null}
+            {/* Always show company/type badge — fall back to 'Admin' when no company name */}
+            <Text style={[qfStyles.resultMeta, {
+              color: p.createdByType === 'Wholesaler' ? '#7C3AED'
+                   : p.createdByType === 'Retailer'   ? '#0369A1'
+                   : colors.primary,
+              fontSize: 10,
+            }]}>
+              {p.companyName || 'Admin'} · {p.createdByType || 'Admin'}
+            </Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
             <Text style={[qfStyles.resultTitle, { color: colors.primary, fontSize: 13 }]}>
@@ -1364,18 +1368,16 @@ export const QuotationFormScreen = ({ navigation, route }) => {
             style={qfStyles.changeBtn}><Text style={qfStyles.changeBtnText}>Change</Text></Pressable>
         </View>
 
-        {/* Product owner badge */}
-        {selectedProduct.companyName ? (
-          <View style={qfStyles.ownerBadge}>
-            <Icon color={
-              selectedProduct.createdByType === 'Wholesaler' ? '#7C3AED' :
-              selectedProduct.createdByType === 'Retailer'   ? '#0369A1' : colors.primary
-            } name="domain" size={13} />
-            <Text style={qfStyles.ownerBadgeText}>
-              {selectedProduct.companyName} · {selectedProduct.createdByType || 'Admin'}
-            </Text>
-          </View>
-        ) : null}
+        {/* Product owner badge — always visible */}
+        <View style={qfStyles.ownerBadge}>
+          <Icon color={
+            selectedProduct.createdByType === 'Wholesaler' ? '#7C3AED' :
+            selectedProduct.createdByType === 'Retailer'   ? '#0369A1' : colors.primary
+          } name="domain" size={13} />
+          <Text style={qfStyles.ownerBadgeText}>
+            {selectedProduct.companyName || 'Admin'} · {selectedProduct.createdByType || 'Admin'}
+          </Text>
+        </View>
 
         {/* All product details grid */}
         <View style={qfStyles.productDetailGrid}>

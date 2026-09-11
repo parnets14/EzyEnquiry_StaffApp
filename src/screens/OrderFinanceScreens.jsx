@@ -372,7 +372,7 @@ export const OrderDetailScreen = ({ navigation, route }) => {
         navigation={navigation}
         showBack
         showNotifications={false}
-        subtitle={order.enquiryCode ? `Ref: ${order.enquiryCode}` : 'Sales Order'}
+        subtitle='Sales Order'
         title={order.id}
       />
 
@@ -568,7 +568,6 @@ export const OrderDetailScreen = ({ navigation, route }) => {
         <InfoRow label="Total"    value={formatCurrency(order.total)} valueColor={colors.navy} />
         {order.branchName  ? <InfoRow label="Branch"   value={order.branchName}  /> : null}
         {order.quotationId ? <InfoRow label="Quotation" value={order.quotationId} /> : null}
-        {order.enquiryCode ? <InfoRow label="Enquiry ref" value={order.enquiryCode} /> : null}
         <InfoRow label="Order date"        value={order.orderDate} />
         <InfoRow label="Expected delivery" value={order.expectedDelivery} />
         {order.deliveryAddress ? <InfoRow label="Delivery address" value={order.deliveryAddress} /> : null}

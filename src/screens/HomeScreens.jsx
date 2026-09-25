@@ -516,13 +516,11 @@ export const ProfileScreen = ({ navigation }) => {
       {/* ── Employment ── */}
       <SectionHeader title="Employment" />
       <SurfaceCard style={styles.infoCard}>
-        {staff.role ? (
-          <ProfileRow
-            icon="shield-account-outline"
-            label="Role"
-            value={staff.role}
-          />
-        ) : null}
+        <ProfileRow
+          icon="shield-key-outline"
+          label="Role Access"
+          value={staff.roleAccess || staff.role || '—'}
+        />
         <ProfileRow
           icon="calendar-check-outline"
           label="Joined"
@@ -533,6 +531,42 @@ export const ProfileScreen = ({ navigation }) => {
           label="Status"
           value={staff.status === 'ACTIVE' ? 'Active' : 'Inactive'}
         />
+      </SurfaceCard>
+
+      {/* ── Salary & Incentive ── */}
+      <SectionHeader title={`Salary & Incentive${staff.incentivePeriod ? ` · ${staff.incentivePeriod}` : ''}`} />
+      <SurfaceCard style={styles.infoCard}>
+        <ProfileRow
+          icon="cash"
+          label="Monthly Salary"
+          value={Number(staff.salary) > 0 ? `₹ ${Number(staff.salary).toLocaleString('en-IN')}` : '—'}
+        />
+        <ProfileRow
+          icon="chart-box-outline"
+          label="My Sales (this month)"
+          value={`₹ ${Number(staff.monthSales || 0).toLocaleString('en-IN')}`}
+        />
+        <ProfileRow
+          icon="sale"
+          label="Incentive Earned"
+          value={`₹ ${Number(staff.incentiveAmount || 0).toLocaleString('en-IN')}${staff.incentivePct ? `  (${staff.incentivePct}%)` : ''}`}
+        />
+        {Array.isArray(staff.incentiveSlabs) && staff.incentiveSlabs.length > 0 ? (
+          staff.incentiveSlabs.map((s, i) => (
+            <ProfileRow
+              key={i}
+              icon="chart-line-variant"
+              label={`Sales ≥ ₹${Number(s.sales_amount).toLocaleString('en-IN')}`}
+              value={`${s.incentive_pct}% incentive`}
+            />
+          ))
+        ) : (
+          <ProfileRow
+            icon="chart-line-variant"
+            label="Incentive"
+            value="No slabs configured"
+          />
+        )}
       </SurfaceCard>
 
       {/* ── App Info ── */}

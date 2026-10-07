@@ -10,8 +10,10 @@ import { colors } from '../theme';
 import { LoginScreen, OtpScreen, SplashScreen } from '../screens/AuthScreens';
 import {
   DashboardScreen,
+  DiscountPermissionsScreen,
   NotificationsScreen,
   ProfileScreen,
+  SalesIncentiveScreen,
 } from '../screens/HomeScreens';
 import {
   CustomerDetailScreen,
@@ -154,6 +156,14 @@ const AppNavigator = () => {
             <Stack.Screen
               component={CollectionDetailScreen}
               name="CollectionDetail"
+            />
+            <Stack.Screen
+              component={SalesIncentiveScreen}
+              name="SalesIncentive"
+            />
+            <Stack.Screen
+              component={DiscountPermissionsScreen}
+              name="DiscountPermissions"
             />
           </>
         ) : (

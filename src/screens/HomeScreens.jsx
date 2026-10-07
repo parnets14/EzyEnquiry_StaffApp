@@ -432,7 +432,8 @@ export const NotificationsScreen = ({ navigation }) => {
 };
 
 export const ProfileScreen = ({ navigation }) => {
-  const { logout, staff, unreadCount } = useApp();
+  const { logout, staff, unreadCount, myProfile, mySales } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
 
   const confirmLogout = () => {
     Alert.alert('Sign out?', 'You will return to the Staff login screen.', [
@@ -443,6 +444,8 @@ export const ProfileScreen = ({ navigation }) => {
 
   return (
     <Screen
+      refreshing={refreshing}
+      onRefresh={onRefresh}
       footer={
         <PrimaryButton
           accessibilityLabel="Sign out of StaffApp"
@@ -533,40 +536,58 @@ export const ProfileScreen = ({ navigation }) => {
         />
       </SurfaceCard>
 
-      {/* ── Salary & Incentive ── */}
-      <SectionHeader title={`Salary & Incentive${staff.incentivePeriod ? ` · ${staff.incentivePeriod}` : ''}`} />
+      {/* ── Salary & Incentive (live, with full detail on its own screen) ── */}
+      <SectionHeader
+        actionLabel="View details"
+        onAction={() => navigation.navigate('SalesIncentive')}
+        title={`Salary & Incentive${mySales?.period ? ` · ${mySales.period}` : ''}`}
+      />
       <SurfaceCard style={styles.infoCard}>
         <ProfileRow
           icon="cash"
           label="Monthly Salary"
-          value={Number(staff.salary) > 0 ? `₹ ${Number(staff.salary).toLocaleString('en-IN')}` : '—'}
+          value={Number(mySales?.salary ?? staff.salary) > 0 ? `₹ ${Number(mySales?.salary ?? staff.salary).toLocaleString('en-IN')}` : '—'}
+        />
+        <ProfileRow
+          icon="target"
+          label="Sales Target"
+          value={Number(mySales?.sales_target) > 0 ? `₹ ${Number(mySales.sales_target).toLocaleString('en-IN')}` : '—'}
         />
         <ProfileRow
           icon="chart-box-outline"
-          label="My Sales (this month)"
-          value={`₹ ${Number(staff.monthSales || 0).toLocaleString('en-IN')}`}
+          label="Sales Completed"
+          value={`₹ ${Number(mySales?.sales_completed ?? staff.monthSales ?? 0).toLocaleString('en-IN')}`}
         />
         <ProfileRow
           icon="sale"
           label="Incentive Earned"
-          value={`₹ ${Number(staff.incentiveAmount || 0).toLocaleString('en-IN')}${staff.incentivePct ? `  (${staff.incentivePct}%)` : ''}`}
+          value={`₹ ${Number(mySales?.incentive_earned ?? staff.incentiveAmount ?? 0).toLocaleString('en-IN')}${(mySales?.incentive_percent ?? staff.incentivePct) ? `  (${mySales?.incentive_percent ?? staff.incentivePct}%)` : ''}`}
         />
-        {Array.isArray(staff.incentiveSlabs) && staff.incentiveSlabs.length > 0 ? (
-          staff.incentiveSlabs.map((s, i) => (
-            <ProfileRow
-              key={i}
-              icon="chart-line-variant"
-              label={`Sales ≥ ₹${Number(s.sales_amount).toLocaleString('en-IN')}`}
-              value={`${s.incentive_pct}% incentive`}
-            />
-          ))
-        ) : (
-          <ProfileRow
-            icon="chart-line-variant"
-            label="Incentive"
-            value="No slabs configured"
-          />
-        )}
+      </SurfaceCard>
+
+      {/* ── Quick links to detail screens ── */}
+      <SectionHeader title="More" />
+      <SurfaceCard style={styles.infoCard}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => navigation.navigate('SalesIncentive')}
+          style={styles.linkRow}>
+          <View style={styles.profileRowIcon}>
+            <Icon color={colors.navy} name="chart-timeline-variant" size={19} />
+          </View>
+          <Text style={styles.linkRowLabel}>Sales &amp; Incentive</Text>
+          <Icon color={colors.primary} name="chevron-right" size={22} />
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => navigation.navigate('DiscountPermissions')}
+          style={styles.linkRow}>
+          <View style={styles.profileRowIcon}>
+            <Icon color={colors.navy} name="tag-percent-outline" size={19} />
+          </View>
+          <Text style={styles.linkRowLabel}>Discount Permissions</Text>
+          <Icon color={colors.primary} name="chevron-right" size={22} />
+        </Pressable>
       </SurfaceCard>
 
       {/* ── App Info ── */}
@@ -609,7 +630,221 @@ const ProfileRow = ({ icon, label, value }) => (
   </View>
 );
 
+// ══════════════════════════════════════════════════════════════
+// SALES & INCENTIVE SCREEN
+// ══════════════════════════════════════════════════════════════
+export const SalesIncentiveScreen = ({ navigation }) => {
+  const { mySales, staff, unreadCount } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
+
+  const target     = Number(mySales?.sales_target || 0);
+  const completed  = Number(mySales?.sales_completed ?? staff?.monthSales ?? 0);
+  const remaining  = Number(mySales?.sales_remaining ?? Math.max(0, target - completed));
+  const pct        = Number(mySales?.target_percent ?? (target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : 0));
+  const salary     = Number(mySales?.salary ?? staff?.salary ?? 0);
+  const incPct     = Number(mySales?.incentive_percent ?? staff?.incentivePct ?? 0);
+  const incEarned  = Number(mySales?.incentive_earned ?? staff?.incentiveAmount ?? 0);
+  const total      = Number(mySales?.expected_total ?? (salary + incEarned));
+  const slabs      = Array.isArray(mySales?.slabs) ? mySales.slabs
+                   : Array.isArray(staff?.incentiveSlabs) ? staff.incentiveSlabs : [];
+
+  return (
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
+      <AppHeader
+        navigation={navigation}
+        showBack
+        title="Sales & Incentive"
+        unreadCount={unreadCount}
+      />
+
+      {/* ── Target progress ── */}
+      <SectionHeader title={`This Month${mySales?.period ? ` · ${mySales.period}` : ''}`} />
+      <SurfaceCard style={styles.infoCard}>
+        <View style={styles.salesHeadRow}>
+          <Text style={styles.salesHeadLabel}>Target Achieved</Text>
+          <Text style={styles.salesHeadPct}>{pct}%</Text>
+        </View>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${Math.min(100, pct)}%` }]} />
+        </View>
+        <View style={styles.salesStatRow}>
+          <ProfileRow icon="target" label="Monthly Sales Target"
+            value={`₹ ${target.toLocaleString('en-IN')}`} />
+          <ProfileRow icon="chart-box-outline" label="Sales Completed"
+            value={`₹ ${completed.toLocaleString('en-IN')}`} />
+          <ProfileRow icon="progress-clock" label="Sales Remaining"
+            value={`₹ ${remaining.toLocaleString('en-IN')}`} />
+        </View>
+      </SurfaceCard>
+
+      {/* ── Salary + incentive breakdown ── */}
+      <SectionHeader title="Earnings" />
+      <SurfaceCard style={styles.infoCard}>
+        <ProfileRow icon="cash" label="Fixed Salary"
+          value={`₹ ${salary.toLocaleString('en-IN')}`} />
+        <ProfileRow icon="percent-outline" label="Incentive Rate"
+          value={incPct ? `${incPct}%` : '—'} />
+        <ProfileRow icon="sale" label="Current Incentive"
+          value={`₹ ${incEarned.toLocaleString('en-IN')}`} />
+        <View style={styles.earnTotalRow}>
+          <Text style={styles.earnTotalLabel}>Expected Total (Salary + Incentive)</Text>
+          <Text style={styles.earnTotalValue}>₹ {total.toLocaleString('en-IN')}</Text>
+        </View>
+      </SurfaceCard>
+
+      {/* ── Incentive slabs ── */}
+      <SectionHeader title="Incentive Slabs" />
+      <SurfaceCard style={styles.infoCard}>
+        {slabs.length ? (
+          slabs.map((s, i) => (
+            <ProfileRow
+              key={i}
+              icon="chart-line-variant"
+              label={`Sales ≥ ₹${Number(s.sales_amount).toLocaleString('en-IN')}`}
+              value={`${s.incentive_pct}% incentive`}
+            />
+          ))
+        ) : (
+          <ProfileRow icon="chart-line-variant" label="Incentive" value="No slabs configured" />
+        )}
+      </SurfaceCard>
+    </Screen>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════
+// DISCOUNT PERMISSIONS SCREEN
+// ══════════════════════════════════════════════════════════════
+export const DiscountPermissionsScreen = ({ navigation }) => {
+  const { myDiscounts, unreadCount } = useApp();
+  const { refreshing, onRefresh } = useRefresh();
+
+  const access   = myDiscounts?.discount_access !== false;
+  const flatCap  = Number(myDiscounts?.max_discount_percent || 0);
+  const perItem  = Array.isArray(myDiscounts?.discount_authorizations)
+    ? myDiscounts.discount_authorizations : [];
+
+  return (
+    <Screen refreshing={refreshing} onRefresh={onRefresh}>
+      <AppHeader
+        navigation={navigation}
+        showBack
+        title="Discount Permissions"
+        unreadCount={unreadCount}
+      />
+
+      {/* ── Overall access ── */}
+      <SurfaceCard style={styles.infoCard}>
+        <ProfileRow
+          icon={access ? 'check-decagram-outline' : 'close-octagon-outline'}
+          label="Discount Access"
+          value={access ? 'Allowed' : 'Not allowed'}
+        />
+        <ProfileRow
+          icon="tag-percent-outline"
+          label="Default Max Discount"
+          value={flatCap > 0 ? `${flatCap}%` : '—'}
+        />
+      </SurfaceCard>
+
+      {/* ── Per-item limits ── */}
+      <SectionHeader title={`Item-wise Limits (${perItem.length})`} />
+      {perItem.length ? (
+        perItem.map((d, i) => (
+          <SurfaceCard key={d.product_id || i} style={styles.discountCard}>
+            <View style={styles.discountCardLeft}>
+              <Text numberOfLines={2} style={styles.discountProduct}>
+                {d.product_name || 'Product'}
+              </Text>
+              {d.product_code ? (
+                <Text style={styles.discountCode}>{d.product_code}</Text>
+              ) : null}
+            </View>
+            <View style={styles.discountBadge}>
+              <Text style={styles.discountBadgeText}>Max {Number(d.max_discount_pct)}%</Text>
+            </View>
+          </SurfaceCard>
+        ))
+      ) : (
+        <EmptyState
+          compact
+          icon="tag-off-outline"
+          message={flatCap > 0
+            ? `No per-item limits. A default cap of ${flatCap}% applies.`
+            : 'You have not been granted any discount permissions.'}
+          title="No item-wise discounts"
+        />
+      )}
+    </Screen>
+  );
+};
+
 const styles = StyleSheet.create({
+  linkRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  linkRowLabel: {
+    color: colors.navy,
+    flex: 1,
+    fontSize: typography.sizes?.body || 15,
+    fontWeight: '700',
+  },
+  salesHeadRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  salesHeadLabel: { color: colors.textMuted, fontSize: 13, fontWeight: '700' },
+  salesHeadPct: { color: colors.primary, fontSize: 22, fontWeight: '900' },
+  progressTrack: {
+    backgroundColor: colors.border,
+    borderRadius: radius.round,
+    height: 10,
+    marginBottom: spacing.md,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.round,
+    height: 10,
+  },
+  salesStatRow: { gap: 2 },
+  earnTotalRow: {
+    alignItems: 'center',
+    borderTopColor: colors.border,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: spacing.sm,
+    paddingTop: spacing.md,
+  },
+  earnTotalLabel: { color: colors.navy, flex: 1, fontSize: 13, fontWeight: '800' },
+  earnTotalValue: { color: colors.primary, fontSize: 18, fontWeight: '900' },
+  discountCard: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'space-between',
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    padding: spacing.md,
+  },
+  discountCardLeft: { flex: 1, minWidth: 0 },
+  discountProduct: { color: colors.navy, fontSize: 14, fontWeight: '700' },
+  discountCode: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+  discountBadge: {
+    backgroundColor: colors.primarySoft,
+    borderRadius: radius.round,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+  },
+  discountBadgeText: { color: colors.primary, fontSize: 13, fontWeight: '800' },
+
+  // ↓↓↓ original profile/dashboard styles below ↓↓↓
   quickRow: {
     flexDirection: 'row',
     gap: spacing.sm,

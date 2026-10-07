@@ -110,12 +110,19 @@ export const quotationApi = {
   create: body          => request('/staff/quotations', { method: 'POST', auth: true, body }),
 };
 
-// ── Products (catalog search, read-only) ─────────────────────
+// ── Products (catalog search, read-only — ONLY assigned items) ─
 export const productApi = {
   list: (params = {}) => request(
     `/staff/products${toQuery({ limit: 500, _t: Date.now(), ...params })}`,
     { auth: true }
   ),
+};
+
+// ── Me (profile, discount permissions, live sales/incentive) ──
+export const meApi = {
+  profile:   () => request('/staff/my-profile',   { auth: true }),
+  discounts: () => request('/staff/my-discounts', { auth: true }),
+  sales:     () => request('/staff/my-sales',     { auth: true }),
 };
 
 // ── Notifications ─────────────────────────────────────────────

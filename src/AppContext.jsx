@@ -5,6 +5,7 @@ import {
   customerApi,
   dispatchApi,
   invoiceApi,
+  meApi,
   notificationApi,
   orderApi,
   productApi,
@@ -562,6 +563,12 @@ export const AppProvider = ({ children }) => {
   const [notifications,  setNotifications]  = useState([]);
   const [unreadCount,    setUnreadCount]    = useState(0);
 
+  // Live staff self-data (from backend, refreshed on load):
+  // profile, item-wise discount permissions, and sales/incentive progress.
+  const [myProfile,   setMyProfile]   = useState(null);
+  const [myDiscounts, setMyDiscounts] = useState(null);
+  const [mySales,     setMySales]     = useState(null);
+
   // Collections and payments are local-only state that wraps invoice data.
   // They are rebuilt when invoices load and when recordCollection fires.
   const [collections, setCollections] = useState([]);
@@ -903,6 +910,32 @@ export const AppProvider = ({ children }) => {
           }
         } catch (err) {
           console.error('❌ Notifications fetch error:', err.message || err);
+        }
+      })(),
+
+      // ── My profile / discount permissions / sales (live) ──
+      (async () => {
+        try {
+          const res = await meApi.profile();
+          if (res.success) setMyProfile(res.data || null);
+        } catch (err) {
+          console.error('❌ My profile fetch error:', err.message || err);
+        }
+      })(),
+      (async () => {
+        try {
+          const res = await meApi.discounts();
+          if (res.success) setMyDiscounts(res.data || null);
+        } catch (err) {
+          console.error('❌ My discounts fetch error:', err.message || err);
+        }
+      })(),
+      (async () => {
+        try {
+          const res = await meApi.sales();
+          if (res.success) setMySales(res.data || null);
+        } catch (err) {
+          console.error('❌ My sales fetch error:', err.message || err);
         }
       })(),
     ]);
@@ -1341,6 +1374,9 @@ export const AppProvider = ({ children }) => {
         collections,
         notifications,
         unreadCount,
+        myProfile,
+        myDiscounts,
+        mySales,
         loadingOrders,
         loadingInvoices,
         loadingCustomers,

@@ -1,7 +1,27 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
-apply from: file("../../node_modules/react-native-vector-icons/fonts.gradle")
+
+// react-native-vector-icons font copy (AGP 9 compatible — inline instead of fonts.gradle)
+afterEvaluate {
+    def fontsSrcDir = file("${rootDir}/../node_modules/react-native-vector-icons/Fonts")
+    def fontsDstDir = file("${buildDir}/intermediates/ReactNativeVectorIcons/fonts")
+
+    def copyFontsTask = tasks.register("copyReactNativeVectorIconFonts", Copy) {
+        from(fontsSrcDir) { include("*.ttf") }
+        into(fontsDstDir)
+    }
+
+    android.sourceSets.main.assets.srcDirs += file("${buildDir}/intermediates/ReactNativeVectorIcons")
+
+    android.applicationVariants.all { variant ->
+        def variantName = variant.name.capitalize()
+        ["generate${variantName}Assets"].each { taskName ->
+            def t = tasks.findByName(taskName)
+            if (t) t.dependsOn(copyFontsTask)
+        }
+    }
+}
 
 /**
  * This is the configuration block to customize your React Native Android app.

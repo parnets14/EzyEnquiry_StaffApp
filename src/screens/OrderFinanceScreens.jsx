@@ -1651,6 +1651,7 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
   const [amount, setAmount] = useState(String(invoice?.balance || ''));
   const [reference, setReference] = useState('');
   const [payError, setPayError] = useState('');
+  const [paying, setPaying] = useState(false);
 
   // Fetch full invoice details with dispatch enrichment
   useEffect(() => {
@@ -1689,8 +1690,6 @@ export const InvoiceDetailScreen = ({ navigation, route }) => {
     ? Math.round(invoice.subtotal / invoice.quantity)
     : 0;
   const isPaid = invoice.balance <= 0;
-
-  const [paying, setPaying] = useState(false);
 
   const handlePay = async () => {
     const value = Number(amount);

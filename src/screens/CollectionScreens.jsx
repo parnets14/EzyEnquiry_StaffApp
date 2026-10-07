@@ -165,12 +165,11 @@ export const CollectionFormScreen = ({ navigation, route }) => {
   const [amount, setAmount] = useState(String(invoice?.balance || ''));
   const [reference, setReference] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   if (!invoice) {
     return <MissingRecord navigation={navigation} title="Invoice not found" />;
   }
-
-  const [submitting, setSubmitting] = useState(false);
 
   const submit = async () => {
     if (submitting) return;
